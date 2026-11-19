@@ -1,0 +1,337 @@
+"""
+plot_results.py
+===============
+results/ altındaki CSV dosyalarından 300 DPI akademik grafikler üretir ve
+plots/ klasörüne kaydeder:
+
+    loss_convergence.png : Eğitim kaybı vs epoch (log y), ortalama ± std bantları
+    gradient_norm.png    : ShallowCNN vs DeepCNN katman bazlı gradyan normları
+                           ve ilk/son katman gradyan oranının epoch'larla değişimi
+    lr_heatmap.png       : Optimizer x öğrenme oranı kararlılık/doğruluk ısı haritası
+    time_vs_acc.png      : Toplam eğitim süresi vs son test doğruluğu
+
+Kullanım:
+    python plot_results.py
+"""
+
+import os
+
+import matplotlib
+
+matplotlib.use("Agg")  # ekran gerektirmeyen arka uç
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.lines import Line2D
+from matplotlib.patches import Rectangle
+
+DPI = 300
+OPT_ORDER = ["SGD", "Momentum", "RMSprop", "Adam"]
+MODEL_ORDER = ["ShallowCNN", "DeepCNN"]
+
+# Renk körlüğü dostu, sabit sıralı kategorik palet (her optimizer hep aynı renk)
+OPT_COLORS = {"SGD": "#2a78d6", "Momentum": "#eb6834", "RMSprop": "#1baf7a", "Adam": "#eda100"}
+# İkincil kodlama: renk tek başına kimlik taşımasın diye her optimizer'a ayrı işaretçi
+OPT_MARKERS = {"SGD": "o", "Momentum": "s", "RMSprop": "^", "Adam": "D"}
+MODEL_STYLE = {
+    "ShallowCNN": dict(color="#2a78d6", linestyle="-", marker="o"),
+    "DeepCNN": dict(color="#eb6834", linestyle="--", marker="s"),
+}
+
+# Nötr mürekkep / ızgara tonları
+INK = "#2b2b28"
+MUTED = "#6b6a63"
+GRID = "#e1e0d9"
+AXIS = "#c3c2b7"
+SURFACE = "#ffffff"
+
+# Tek tonlu (mavi) sıralı renk skalası: açık = düşük doğruluk, koyu = yüksek
+SEQ_BLUE = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
+
+
+def setup_style():
+    plt.rcParams.update({
+        "figure.dpi": 110,
+        "savefig.dpi": DPI,
+        "savefig.bbox": "tight",
+        "savefig.facecolor": SURFACE,
+        "figure.facecolor": SURFACE,
+        "axes.facecolor": SURFACE,
+        "font.family": "DejaVu Sans",
+        "font.size": 10,
+        "axes.titlesize": 11,
+        "axes.titleweight": "bold",
+        "axes.labelsize": 10,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.edgecolor": AXIS,
+        "axes.linewidth": 0.8,
+        "axes.grid": True,
+        "axes.axisbelow": True,
+        "grid.color": GRID,
+        "grid.linewidth": 0.6,
+        "xtick.color": MUTED,
+        "ytick.color": MUTED,
+        "xtick.labelcolor": INK,
+        "ytick.labelcolor": INK,
+        "axes.labelcolor": INK,
+        "axes.titlecolor": INK,
+        "text.color": INK,
+        "legend.frameon": False,
+        "lines.linewidth": 2,
+    })
+
+
+def _band(mean, std, floor=1e-12):
+    """Log ölçekte çizilebilmesi için alt sınırı pozitif tutulan ± std bandı."""
+    std = np.nan_to_num(np.asarray(std, dtype=float))
+    lo = np.maximum(mean - std, np.maximum(floor, np.asarray(mean) * 1e-3))
+    return lo, mean + std
+
+
+def _save(fig, plots_dir, name):
+    path = os.path.join(plots_dir, name)
+    fig.savefig(path)
+    plt.close(fig)
+    print(f"  kaydedildi: {path}")
+
+
+# ---------------------------------------------------------------------------
+# 1) Kayıp yakınsaması
+# ---------------------------------------------------------------------------
+def plot_loss_convergence(epochs_df, plots_dir):
+    df = epochs_df[np.isfinite(epochs_df.train_loss)]
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.2), sharey=True)
+    for ax, model in zip(axes, MODEL_ORDER):
+        sub = df[df.model == model]
+        for opt in OPT_ORDER:
+            s = sub[sub.optimizer == opt]
+            if s.empty:
+                continue
+            g = s.groupby("epoch")["train_loss"].agg(["mean", "std"]).reset_index()
+            lo, hi = _band(g["mean"].values, g["std"].values)
+            ax.fill_between(g.epoch, lo, hi, color=OPT_COLORS[opt], alpha=0.18, linewidth=0)
+            ax.plot(g.epoch, g["mean"], color=OPT_COLORS[opt], marker=OPT_MARKERS[opt],
+                    markersize=5, markeredgecolor=SURFACE, markeredgewidth=0.8, label=opt)
+        ax.set_yscale("log")
+        ax.set_title(model)
+        ax.set_xlabel("Epoch")
+        ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
+        if sub.empty:
+            ax.text(0.5, 0.5, "veri yok", transform=ax.transAxes, ha="center", color=MUTED)
+    axes[0].set_ylabel("Eğitim kaybı (log ölçek)")
+    handles, labels = axes[0].get_legend_handles_labels()
+    if not handles:
+        handles, labels = axes[1].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=4, bbox_to_anchor=(0.5, 1.06))
+    fig.text(0.5, -0.04, "Çizgi: seed'ler üzerinden ortalama; gölge: ± 1 standart sapma",
+             ha="center", color=MUTED, fontsize=8.5)
+    fig.tight_layout()
+    _save(fig, plots_dir, "loss_convergence.png")
+
+
+# ---------------------------------------------------------------------------
+# 2) Gradyan normları
+# ---------------------------------------------------------------------------
+def plot_gradient_norm(layer_df, epochs_df, plots_dir, grad_epoch=1):
+    """
+    Üst satır : epoch `grad_epoch` boyunca ortalama ||grad||_2, katman sırasına göre
+                (girdi -> çıktı). DeepCNN'de ilk katmanlara doğru düşüş = gradyan sönmesi.
+    Alt satır : ||g_ilk|| / ||g_son|| oranının epoch'larla değişimi (1'den çok küçük
+                ise ilk katmanlar neredeyse öğrenmiyor demektir).
+    """
+    fig, axes = plt.subplots(2, 4, figsize=(15, 6.8))
+    for j, opt in enumerate(OPT_ORDER):
+        ax_top, ax_bot = axes[0, j], axes[1, j]
+        for model in MODEL_ORDER:
+            st = MODEL_STYLE[model]
+
+            # --- katman bazlı norm ---
+            s = layer_df[(layer_df.model == model) & (layer_df.optimizer == opt)
+                         & (layer_df.epoch == grad_epoch) & np.isfinite(layer_df.grad_norm)]
+            if not s.empty:
+                g = (s.groupby(["layer_idx", "layer_name"])["grad_norm"]
+                      .agg(["mean", "std"]).reset_index().sort_values("layer_idx"))
+                x = g.layer_idx.values + 1
+                lo, hi = _band(g["mean"].values, g["std"].values)
+                ax_top.fill_between(x, lo, hi, color=st["color"], alpha=0.15, linewidth=0)
+                ax_top.plot(x, g["mean"], color=st["color"], linestyle=st["linestyle"],
+                            marker=st["marker"], markersize=4.5, label=model)
+
+            # --- ilk/son katman oranı ---
+            e = epochs_df[(epochs_df.model == model) & (epochs_df.optimizer == opt)].copy()
+            e["ratio"] = e.grad_first / e.grad_last
+            e = e[np.isfinite(e.ratio) & (e.ratio > 0)]
+            if not e.empty:
+                g = e.groupby("epoch")["ratio"].agg(["mean", "std"]).reset_index()
+                lo, hi = _band(g["mean"].values, g["std"].values)
+                ax_bot.fill_between(g.epoch, lo, hi, color=st["color"], alpha=0.15, linewidth=0)
+                ax_bot.plot(g.epoch, g["mean"], color=st["color"], linestyle=st["linestyle"],
+                            marker=st["marker"], markersize=4.5, label=model)
+
+        ax_top.set_yscale("log")
+        ax_top.set_title(opt)
+        ax_top.set_xlabel("Katman indeksi (girdi → çıktı)")
+        ax_top.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
+
+        ax_bot.set_yscale("log")
+        ax_bot.axhline(1.0, color=AXIS, linestyle=":", linewidth=1.2)
+        ax_bot.set_xlabel("Epoch")
+        ax_bot.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(integer=True))
+
+    axes[0, 0].set_ylabel(f"‖∇W‖₂  (epoch {grad_epoch} ortalaması)")
+    axes[1, 0].set_ylabel("‖∇W_ilk‖₂ / ‖∇W_son‖₂")
+    handles = [Line2D([0], [0], color=MODEL_STYLE[m]["color"], linestyle=MODEL_STYLE[m]["linestyle"],
+                      marker=MODEL_STYLE[m]["marker"], label=m) for m in MODEL_ORDER]
+    fig.legend(handles=handles, loc="upper center", ncol=2, bbox_to_anchor=(0.5, 1.04))
+    fig.text(0.5, -0.02,
+             "Üst: katman bazlı L2 gradyan normu (seed ortalaması ± std). "
+             "Alt: ilk/son katman gradyan oranı; 1'in çok altı → gradyan sönmesi.",
+             ha="center", color=MUTED, fontsize=8.5)
+    fig.tight_layout()
+    _save(fig, plots_dir, "gradient_norm.png")
+
+
+# ---------------------------------------------------------------------------
+# 3) Öğrenme oranı ısı haritası
+# ---------------------------------------------------------------------------
+def plot_lr_heatmap(exp2_df, plots_dir):
+    lrs = sorted(exp2_df.lr.unique(), reverse=True)
+    opts = [o for o in OPT_ORDER if o in set(exp2_df.optimizer)]
+    acc = np.full((len(opts), len(lrs)), np.nan)
+    status = np.full((len(opts), len(lrs)), "", dtype=object)
+    div_ep = np.full((len(opts), len(lrs)), np.nan)
+
+    for r in exp2_df.itertuples():
+        i, j = opts.index(r.optimizer), lrs.index(r.lr)
+        acc[i, j] = r.final_test_acc * 100
+        status[i, j] = r.status
+        div_ep[i, j] = r.diverged_epoch if pd.notna(r.diverged_epoch) else np.nan
+
+    exploded = (status == "nan_inf") | ~np.isfinite(acc)
+    cmap = LinearSegmentedColormap.from_list("seq_blue", SEQ_BLUE)
+    cmap.set_bad(SURFACE)
+
+    fig, ax = plt.subplots(figsize=(8.5, 0.75 * len(opts) + 1.8))
+    im = ax.imshow(np.ma.masked_where(exploded, acc), cmap=cmap, vmin=0, vmax=100, aspect="auto")
+
+    for i in range(len(opts)):
+        for j in range(len(lrs)):
+            if exploded[i, j]:
+                # Patlayan hücre: taralı, renk skalasının dışında
+                ax.add_patch(Rectangle((j - 0.5, i - 0.5), 1, 1, facecolor=GRID,
+                                       edgecolor="#a8a79d", hatch="///", linewidth=0))
+                ep = f"\nepoch {int(div_ep[i, j])}" if np.isfinite(div_ep[i, j]) else ""
+                ax.text(j, i, f"NaN/Inf{ep}", ha="center", va="center", fontsize=8.5,
+                        fontweight="bold", color=INK)
+            else:
+                txt = f"{acc[i, j]:.1f}%"
+                if status[i, j] == "stuck":
+                    txt += "\n(takıldı)"
+                ax.text(j, i, txt, ha="center", va="center", fontsize=9,
+                        color=SURFACE if acc[i, j] > 55 else INK)
+
+    ax.set_xticks(range(len(lrs)))
+    ax.set_xticklabels([f"{lr:g}" for lr in lrs])
+    ax.set_yticks(range(len(opts)))
+    ax.set_yticklabels(opts)
+    ax.set_xlabel("Öğrenme oranı (lr)")
+    ax.set_title("DeepCNN: öğrenme oranı – optimizer kararlılık haritası")
+
+    # Hücreler arasında beyaz boşluk
+    ax.set_xticks(np.arange(-0.5, len(lrs), 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, len(opts), 1), minor=True)
+    ax.grid(which="minor", color=SURFACE, linewidth=2.5)
+    ax.grid(which="major", visible=False)
+    ax.tick_params(which="both", length=0)
+    for sp in ax.spines.values():
+        sp.set_visible(False)
+
+    cb = fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
+    cb.set_label("Son test doğruluğu (%)")
+    cb.outline.set_visible(False)
+    fig.text(0.5, -0.03,
+             "Taralı: NaN/Inf (nümerik taşma/patlama).  'takıldı': sayısal olarak sonlu "
+             "ancak doğruluk şans düzeyinde (< %15).",
+             ha="center", color=MUTED, fontsize=8.5)
+    fig.tight_layout()
+    _save(fig, plots_dir, "lr_heatmap.png")
+
+
+# ---------------------------------------------------------------------------
+# 4) Süre vs doğruluk
+# ---------------------------------------------------------------------------
+def plot_time_vs_acc(runs_df, plots_dir):
+    fig, ax = plt.subplots(figsize=(7.5, 5))
+    for model in MODEL_ORDER:
+        for opt in OPT_ORDER:
+            s = runs_df[(runs_df.model == model) & (runs_df.optimizer == opt)]
+            s = s[np.isfinite(s.final_test_acc)]
+            if s.empty:
+                continue
+            c = OPT_COLORS[opt]
+            face = c if model == "ShallowCNN" else SURFACE  # dolu = sığ, boş = derin
+            # Tek tek seed'ler (soluk)
+            ax.scatter(s.total_time, s.final_test_acc * 100, s=14, color=c, alpha=0.3,
+                       marker=OPT_MARKERS[opt], linewidths=0)
+            # Ortalama ± std
+            ax.errorbar(s.total_time.mean(), s.final_test_acc.mean() * 100,
+                        xerr=np.nan_to_num(s.total_time.std()),
+                        yerr=np.nan_to_num(s.final_test_acc.std() * 100),
+                        fmt=OPT_MARKERS[opt], markersize=9, markerfacecolor=face,
+                        markeredgecolor=c, markeredgewidth=2, ecolor=c, elinewidth=1.2,
+                        capsize=3, zorder=3)
+
+    ax.set_xlabel("Toplam eğitim süresi (s)")
+    ax.set_ylabel("Son test doğruluğu (%)")
+    ax.set_title("Eğitim süresi – test doğruluğu")
+
+    opt_handles = [Line2D([0], [0], marker=OPT_MARKERS[o], color="none", markerfacecolor=OPT_COLORS[o],
+                          markeredgecolor=OPT_COLORS[o], markersize=8, label=o) for o in OPT_ORDER]
+    model_handles = [
+        Line2D([0], [0], marker="o", color="none", markerfacecolor=MUTED, markeredgecolor=MUTED,
+               markersize=8, label="ShallowCNN (dolu)"),
+        Line2D([0], [0], marker="o", color="none", markerfacecolor=SURFACE, markeredgecolor=MUTED,
+               markeredgewidth=2, markersize=8, label="DeepCNN (boş)"),
+    ]
+    leg1 = ax.legend(handles=opt_handles, title="Optimizer", loc="lower right")
+    ax.add_artist(leg1)
+    ax.legend(handles=model_handles, title="Model", loc="lower center")
+    fig.text(0.5, -0.03, "Büyük işaretçi: seed ortalaması ± std;  küçük soluk noktalar: tek tek seed'ler",
+             ha="center", color=MUTED, fontsize=8.5)
+    fig.tight_layout()
+    _save(fig, plots_dir, "time_vs_acc.png")
+
+
+# ---------------------------------------------------------------------------
+def _read(results_dir, name):
+    path = os.path.join(results_dir, name)
+    if not os.path.exists(path):
+        print(f"  atlandı: {path} bulunamadı")
+        return None
+    return pd.read_csv(path)
+
+
+def main(results_dir="results", plots_dir="plots"):
+    setup_style()
+    os.makedirs(plots_dir, exist_ok=True)
+    print("\nGrafikler üretiliyor...")
+
+    epochs = _read(results_dir, "exp1_epochs.csv")
+    layers = _read(results_dir, "exp1_layer_grads.csv")
+    runs = _read(results_dir, "exp1_runs.csv")
+    exp2 = _read(results_dir, "exp2_lr_stability.csv")
+
+    if epochs is not None:
+        plot_loss_convergence(epochs, plots_dir)
+    if epochs is not None and layers is not None:
+        plot_gradient_norm(layers, epochs, plots_dir)
+    if exp2 is not None:
+        plot_lr_heatmap(exp2, plots_dir)
+    if runs is not None:
+        plot_time_vs_acc(runs, plots_dir)
+
+
+if __name__ == "__main__":
+    main()
