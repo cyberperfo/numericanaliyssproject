@@ -9,6 +9,8 @@ plots/ klasörüne kaydeder:
                            ve ilk/son katman gradyan oranının epoch'larla değişimi
     lr_heatmap.png       : Optimizer x öğrenme oranı kararlılık/doğruluk ısı haritası
     time_vs_acc.png      : Toplam eğitim süresi vs son test doğruluğu
+    fd_error.png         : Sonlu fark göreli hatası vs h (kesme/yuvarlama dengesi)
+    cpu_gpu.png          : CPU ve GPU'da iterasyon başına süre
 
 Kullanım:
     python plot_results.py
@@ -305,6 +307,94 @@ def plot_time_vs_acc(runs_df, plots_dir):
 
 
 # ---------------------------------------------------------------------------
+# 5) Sonlu fark hata analizi
+# ---------------------------------------------------------------------------
+DTYPE_STYLE = {
+    "float64": dict(color="#2a78d6", marker="o", eps=np.finfo(np.float64).eps),
+    "float32": dict(color="#eb6834", marker="s", eps=np.finfo(np.float32).eps),
+}
+
+
+def plot_fd_error(fd_df, plots_dir):
+    models = [m for m in MODEL_ORDER if m in set(fd_df.model)]
+    fig, axes = plt.subplots(1, len(models), figsize=(5.2 * len(models), 4.3), sharey=True,
+                             squeeze=False)
+    for ax, model in zip(axes[0], models):
+        sub = fd_df[fd_df.model == model]
+        for dtype, st in DTYPE_STYLE.items():
+            s = sub[sub.dtype == dtype].sort_values("h")
+            if s.empty:
+                continue
+            err = np.maximum(s.rel_error.values, 1e-17)  # log eksende 0 çizilemez
+            ax.plot(s.h, err, color=st["color"], marker=st["marker"], markersize=4.5, label=dtype)
+            # Kuramsal en iyi adım h* ~ ε^(1/3)
+            ax.axvline(st["eps"] ** (1 / 3), color=st["color"], linestyle=":", linewidth=1.2)
+
+        # Eğim kılavuzları (float64 eğrisine sabitlenmiş): sağda ∝ h², solda ∝ 1/h
+        s64 = sub[sub.dtype == "float64"].sort_values("h")
+        if len(s64) > 3:
+            h = s64.h.values
+            e = np.maximum(s64.rel_error.values, 1e-17)
+            i_r = np.argmin(np.abs(np.log10(h) + 2))      # h ≈ 1e-2
+            hr = np.logspace(-4, 0, 20)
+            ax.plot(hr, e[i_r] * (hr / h[i_r]) ** 2, color=MUTED, linestyle="--", linewidth=1)
+            ax.text(hr[-6], e[i_r] * (hr[-6] / h[i_r]) ** 2 * 3, "∝ h²  (kesme)",
+                    color=MUTED, fontsize=8.5, ha="right")
+            i_l = np.argmin(np.abs(np.log10(h) + 10))     # h ≈ 1e-10
+            hl = np.logspace(-12, -7, 20)
+            ax.plot(hl, e[i_l] * (h[i_l] / hl), color=MUTED, linestyle="--", linewidth=1)
+            ax.text(hl[8], e[i_l] * (h[i_l] / hl[8]) / 6, "∝ ε/h  (yuvarlama)",
+                    color=MUTED, fontsize=8.5, ha="left")
+
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        ax.set_title(model)
+        ax.set_xlabel("Adım boyu h")
+    axes[0, 0].set_ylabel("Göreli hata  |D_h − ∇L·v| / |∇L·v|")
+    axes[0, 0].legend(title="Aritmetik", loc="lower left")
+    fig.text(0.5, -0.03,
+             "Merkezi fark D_h = [L(θ+hv) − L(θ−hv)] / 2h, referans: float64 otomatik türev.  "
+             "Noktalı dikey çizgiler: kuramsal en iyi adım h* ≈ ε^(1/3).",
+             ha="center", color=MUTED, fontsize=8.5)
+    fig.tight_layout()
+    _save(fig, plots_dir, "fd_error.png")
+
+
+# ---------------------------------------------------------------------------
+# 6) CPU / GPU
+# ---------------------------------------------------------------------------
+def plot_cpu_gpu(bench_df, plots_dir):
+    devices = list(dict.fromkeys(bench_df.device))           # cpu, (cuda)
+    names = {d: bench_df[bench_df.device == d].device_name.iloc[0] for d in devices}
+    colors = {"cpu": "#2a78d6", "cuda": "#eb6834"}
+    models = [m for m in MODEL_ORDER if m in set(bench_df.model)]
+    x = np.arange(len(models))
+    width = 0.8 / len(devices)
+
+    fig, ax = plt.subplots(figsize=(6.5, 4.3))
+    for k, d in enumerate(devices):
+        s = bench_df[bench_df.device == d].set_index("model").loc[models]
+        pos = x + (k - (len(devices) - 1) / 2) * width
+        ax.bar(pos, s.ms_per_iter_mean, width=width - 0.03, yerr=s.ms_per_iter_std,
+               color=colors.get(d, MUTED), label=names[d], capsize=3,
+               error_kw=dict(ecolor=INK, elinewidth=1))
+        for p, v, row in zip(pos, s.ms_per_iter_mean, s.itertuples()):
+            label = f"{v:.1f} ms"
+            if d == "cuda" and "speedup_vs_cpu" in s.columns:
+                label += f"\n×{row.speedup_vs_cpu:.1f}"
+            ax.text(p, v, label, ha="center", va="bottom", fontsize=8.5, color=INK)
+    ax.set_xticks(x)
+    ax.set_xticklabels(models)
+    ax.set_ylabel("İterasyon başına süre (ms)")
+    ax.set_title("CPU – GPU karşılaştırması (ileri + geri + Adam adımı)")
+    ax.grid(axis="x", visible=False)
+    ax.legend(loc="upper left")
+    ax.margins(y=0.2)
+    fig.tight_layout()
+    _save(fig, plots_dir, "cpu_gpu.png")
+
+
+# ---------------------------------------------------------------------------
 def _read(results_dir, name):
     path = os.path.join(results_dir, name)
     if not os.path.exists(path):
@@ -322,7 +412,13 @@ def main(results_dir="results", plots_dir="plots"):
     layers = _read(results_dir, "exp1_layer_grads.csv")
     runs = _read(results_dir, "exp1_runs.csv")
     exp2 = _read(results_dir, "exp2_lr_stability.csv")
+    fd = _read(results_dir, "exp3_fd_error.csv")
+    bench = _read(results_dir, "exp4_cpu_gpu.csv")
 
+    if fd is not None:
+        plot_fd_error(fd, plots_dir)
+    if bench is not None:
+        plot_cpu_gpu(bench, plots_dir)
     if epochs is not None:
         plot_loss_convergence(epochs, plots_dir)
     if epochs is not None and layers is not None:
@@ -334,4 +430,10 @@ def main(results_dir="results", plots_dir="plots"):
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Sonuç CSV'lerinden grafik üretir")
+    ap.add_argument("--results-dir", default="results")
+    ap.add_argument("--plots-dir", default="plots")
+    a = ap.parse_args()
+    main(results_dir=a.results_dir, plots_dir=a.plots_dir)

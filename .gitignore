@@ -1,0 +1,7 @@
+data/
+__pycache__/
+*.pyc
+results_demo/
+plots_demo/
+results_quick/
+.ipynb_checkpoints/
