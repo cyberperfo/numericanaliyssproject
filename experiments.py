@@ -14,9 +14,10 @@ Deney 1 - Yakınsama ve seed kararlılığı
     -> results/exp1_summary.csv       (ortalama ± standart sapma)
 
 Deney 2 - Öğrenme oranı hassasiyeti ve nümerik patlama
-    DeepCNN, 4 optimizer x lr = [0.5, 0.1, 0.01, 0.001, 0.0001].
+    DeepCNN, 4 optimizer x lr = [0.5, 0.1, 0.01, 0.001, 0.0001] x 3 seed.
     NaN / Inf oluşan (taşma/patlama) konfigürasyonlar tespit edilir.
-    -> results/exp2_lr_stability.csv
+    -> results/exp2_lr_stability.csv   (koşu bazlı)
+    -> results/exp2_summary.csv        (seed'ler üzerinden özet)
     -> results/exp2_epochs.csv
 
 Deney 3 - Gradyan doğrulaması ve sonlu fark hata analizi
@@ -27,6 +28,19 @@ Deney 3 - Gradyan doğrulaması ve sonlu fark hata analizi
 Deney 4 - CPU / GPU performans karşılaştırması
     İterasyon başına süre (ileri + geri + optimizer adımı).
     -> results/exp4_cpu_gpu.csv
+
+Deney 5 - Hessian spektrumu ve kararlılık sınırı (kuvvet yöntemi)
+    λ_max = Hessian'ın en büyük özdeğeri, Hessian–vektör çarpımı + kuvvet yöntemiyle
+    eğitim boyunca (epoch 0..E) ölçülür; η_kritik = 2/λ_max teorik sınırı Deney 2'deki
+    deneysel kararlılık sınırıyla karşılaştırılır.
+    -> results/exp5_sharpness.csv, results/exp5_power_history.csv
+
+Deney 6 - Ablasyon
+    (a) DeepCNN + BatchNorm: gradyan sönmesinin nedeninin normalizasyon eksikliği
+        olduğunu sınar (SGD, Momentum).
+    (b) Adam yanlılık düzeltmesi kapalı: düzeltmenin erken iterasyonlardaki etkisi.
+    5 seed, Deney 1 ile aynı seed'ler -> eşleştirilmiş (paired) t-testi.
+    -> results/exp6_epochs.csv, results/exp6_runs.csv, results/exp6_summary.csv
 
 Optimizer'lar optimizers.py içinde formüllerinden sıfırdan yazılmıştır
 (--optim-impl manual, varsayılan). --optim-impl torch ile PyTorch'un referans
@@ -57,6 +71,7 @@ from scipy import stats
 from torchvision import datasets
 
 from gradient_check import default_hs, directional_fd_errors
+from hessian import critical_lr, model_sharpness
 from models import build_model, weight_layers
 from optimizers import make_optimizer
 
@@ -77,6 +92,10 @@ FMNIST_MEAN, FMNIST_STD = 0.2860, 0.3530
 # Şans düzeyi 10 sınıf için %10; altında kalan sonlu koşular "takıldı" sayılır
 STUCK_ACC_THRESHOLD = 0.15
 
+# Başlangıç kaybı ≈ ln(10) ≈ 2.30. Sonlu ama bunun 10 katını aşan eğitim kaybı
+# "patladı" sayılır (taşma eşiğine ulaşmamış nümerik ıraksama).
+EXPLODED_LOSS_THRESHOLD = 10 * math.log(10)
+
 # Yakınsama hızı ölçütü: test doğruluğunun ilk kez bu eşiğe ulaştığı epoch/iterasyon
 TARGET_ACC = 0.85
 
@@ -94,6 +113,44 @@ def set_seed(seed: int) -> None:
     torch.backends.cudnn.benchmark = False
     # Deterministik karşılığı olmayan bir işlem varsa hata yerine uyarı ver
     torch.use_deterministic_algorithms(True, warn_only=True)
+
+
+def classify_status(status, train_losses, final_acc):
+    """
+    Koşu durumunu belirler:
+      nan_inf  : kayıp veya gradyan NaN/Inf oldu (kayan nokta taşması)
+      exploded : sayılar sonlu kaldı ama eğitim kaybı EXPLODED_LOSS_THRESHOLD'u aştı
+                 ve model şans düzeyinde kaldı (taşmaya varmamış ıraksama)
+      stuck    : kayıp patlamadı ama doğruluk şans düzeyinde (< STUCK_ACC_THRESHOLD)
+      stable   : öğrenme gerçekleşti
+    """
+    if status == "nan_inf":
+        return status
+    if not (final_acc >= STUCK_ACC_THRESHOLD):
+        losses = np.asarray(train_losses, dtype=float)
+        if np.any(np.isfinite(losses) & (losses > EXPLODED_LOSS_THRESHOLD)):
+            return "exploded"
+        return "stuck"
+    return "stable"
+
+
+def gpu_warmup(data, device, batch_size, n_iters=3):
+    """
+    İlk CUDA/cuDNN çağrısı (bağlam oluşturma, çekirdek seçimi) birkaç saniye sürer.
+    Isınma yapılmazsa bu süre ilk koşunun ilk epoch'una eklenir ve süre ölçümlerini
+    bozar. Her koşu set_seed() ile başladığından ısınma sonuçları etkilemez.
+    """
+    if device.type != "cuda":
+        return
+    xb, yb = data[0][:batch_size], data[1][:batch_size]
+    for name in MODELS:
+        model = build_model(name).to(device)
+        opt = make_optimizer("Adam", model.parameters(), 1e-3)
+        for _ in range(n_iters):
+            opt.zero_grad(set_to_none=True)
+            F.cross_entropy(model(xb), yb).backward()
+            opt.step()
+    sync(device)
 
 
 def sync(device: torch.device) -> None:
@@ -257,8 +314,7 @@ def run_training(model_name, opt_name, lr, seed, epochs, data, batch_size, devic
             break
 
     final = epoch_rows[-1]
-    if status == "stable" and final["test_acc"] < STUCK_ACC_THRESHOLD:
-        status = "stuck"  # sayısal olarak sonlu ama öğrenemedi (şans düzeyi)
+    status = classify_status(status, [e["train_loss"] for e in epoch_rows], final["test_acc"])
 
     summary = dict(base, status=status, diverged_epoch=div_epoch, diverged_iter=div_iter,
                    epochs_completed=len(epoch_rows), final_train_loss=final["train_loss"],
@@ -326,7 +382,7 @@ def summarize_exp1(runs_df: pd.DataFrame, epochs_df: pd.DataFrame,
                 "optimizer": opt,
                 "lr": g.lr.iloc[0],
                 "n_seeds": len(g),
-                "n_diverged": int((g.status == "nan_inf").sum()),
+                "n_diverged": int(g.status.isin(["nan_inf", "exploded"]).sum()),
                 f"reached_{int(TARGET_ACC * 100)}%": f"{n_hit}/{len(e)}",
                 f"epochs_to_{int(TARGET_ACC * 100)}%": fmt_pm(e, "{:.1f}") if n_hit else "ulaşılamadı",
                 f"iters_to_{int(TARGET_ACC * 100)}%": fmt_pm(e * iters_per_epoch, "{:.0f}")
@@ -388,21 +444,22 @@ def experiment_2(args, data, device):
     print("\n" + "=" * 70)
     print("DENEY 2: Öğrenme oranı hassasiyeti ve nümerik patlama (DeepCNN)")
     print("=" * 70)
-    seed = args.seeds[0]
+    seeds = args.seeds[:args.exp2_seeds]
     epoch_rows, rows = [], []
-    total = len(OPTIMIZERS) * len(LR_GRID)
+    total = len(OPTIMIZERS) * len(LR_GRID) * len(seeds)
     k = 0
     for opt in OPTIMIZERS:
         for lr in LR_GRID:
-            k += 1
-            tag = f"[{k}/{total}] DeepCNN {opt:<8} lr={lr:<7g}"
-            print(tag)
-            e, _, s = run_training("DeepCNN", opt, lr, seed, args.exp2_epochs,
-                                   data, args.batch_size, device, tag="   ",
-                                   impl=args.optim_impl)
-            epoch_rows += e
-            rows.append(s)
-            save_csv(epoch_rows, os.path.join(args.results_dir, "exp2_epochs.csv"))
+            for seed in seeds:
+                k += 1
+                tag = f"[{k}/{total}] DeepCNN {opt:<8} lr={lr:<7g} seed={seed:<4}"
+                print(tag)
+                e, _, s = run_training("DeepCNN", opt, lr, seed, args.exp2_epochs,
+                                       data, args.batch_size, device, tag="   ",
+                                       impl=args.optim_impl)
+                epoch_rows += e
+                rows.append(s)
+                save_csv(epoch_rows, os.path.join(args.results_dir, "exp2_epochs.csv"))
 
     df = pd.DataFrame(rows)
     df["nan_or_inf"] = df.status == "nan_inf"
@@ -412,9 +469,156 @@ def experiment_2(args, data, device):
     df = df[cols]
     path = os.path.join(args.results_dir, "exp2_lr_stability.csv")
     df.to_csv(path, index=False)
-    print("\nDeney 2 sonuçları:")
-    print(df.to_string(index=False))
     print(f"-> {path}")
+
+    summary = summarize_exp2(df)
+    path = os.path.join(args.results_dir, "exp2_summary.csv")
+    summary.to_csv(path, index=False, encoding="utf-8-sig")
+    print("\nDeney 2 özeti (seed'ler üzerinden):")
+    print(summary.to_string(index=False))
+    print(f"-> {path}")
+
+
+STATUS_TR = {"stable": "kararlı", "stuck": "takıldı", "exploded": "patladı", "nan_inf": "NaN/Inf"}
+
+
+def summarize_exp2(df: pd.DataFrame) -> pd.DataFrame:
+    """Her (optimizer, lr) için durum sayıları ve son doğruluk ortalama ± std."""
+    rows = []
+    for opt in OPTIMIZERS:
+        for lr in LR_GRID:
+            g = df[(df.optimizer == opt) & (df.lr == lr)]
+            if g.empty:
+                continue
+            counts = g.status.value_counts()
+            rows.append({
+                "optimizer": opt, "lr": lr, "n_seeds": len(g),
+                "durum": ", ".join(f"{STATUS_TR.get(s, s)} {n}/{len(g)}"
+                                   for s, n in counts.items()),
+                "n_nan_inf": int(counts.get("nan_inf", 0)),
+                "n_stable": int(counts.get("stable", 0)),
+                "final_test_acc(%)": fmt_pm(g.final_test_acc * 100, "{:.2f}"),
+                "max_grad_norm(max)": f"{g.max_grad_norm.max():.3g}",
+            })
+    return pd.DataFrame(rows)
+
+
+def experiment_5(args, data, device):
+    """
+    Hessian'ın en büyük özdeğeri λ_max (kuvvet yöntemi) eğitim boyunca ölçülür.
+    Eğitim Momentum (lr=0.01) ile yapılır: her iki modeli de eğitebilen ortak yöntem.
+    λ_max sabit bir eğitim alt kümesinde (ilk N örnek) hesaplanır.
+    """
+    print("\n" + "=" * 70)
+    print("DENEY 5: Hessian spektrumu (kuvvet yöntemi) ve kararlılık sınırı")
+    print("=" * 70)
+    Xtr, ytr, _, _ = data
+    Xs, ys = Xtr[:args.hess_samples], ytr[:args.hess_samples]
+    seeds = args.seeds[:args.hess_seeds]
+    rows, hist_rows = [], []
+    for model_name in MODELS:
+        for seed in seeds:
+            set_seed(seed)
+            model = build_model(model_name).to(device)
+            layers = weight_layers(model)
+            opt = make_optimizer("Momentum", model.parameters(), DEFAULT_LR["Momentum"],
+                                 impl=args.optim_impl)
+            gen = torch.Generator().manual_seed(seed)
+            for epoch in range(args.hess_epochs + 1):
+                train_loss = np.nan
+                if epoch > 0:
+                    r = train_one_epoch(model, opt, layers, Xtr, ytr, args.batch_size, gen)
+                    train_loss = r["train_loss"]
+                sync(device)
+                t0 = time.perf_counter()
+                lam, hist = model_sharpness(model, Xs, ys, n_iter=args.hess_iters,
+                                            tol=args.hess_tol, seed=seed)
+                sync(device)
+                dt = time.perf_counter() - t0
+                rows.append(dict(model=model_name, seed=seed, epoch=epoch, train_loss=train_loss,
+                                 lambda_max=lam, power_iters=len(hist),
+                                 eta_crit_gd=critical_lr(lam),
+                                 eta_crit_momentum=critical_lr(lam, momentum=0.9),
+                                 time_s=dt))
+                if seed == seeds[0]:
+                    hist_rows += [dict(model=model_name, epoch=epoch, k=k + 1, lambda_k=v)
+                                  for k, v in enumerate(hist)]
+                print(f"  {model_name:<10} seed={seed:<4} epoch {epoch}: λ_max={lam:10.4g}  "
+                      f"η_kritik(GD)={critical_lr(lam):9.4g}  ({len(hist)} iter, {dt:.1f}s)")
+    save_csv(rows, os.path.join(args.results_dir, "exp5_sharpness.csv"))
+    save_csv(hist_rows, os.path.join(args.results_dir, "exp5_power_history.csv"))
+    print(f"-> {os.path.join(args.results_dir, 'exp5_sharpness.csv')}")
+
+
+# (etiket, model, optimizer, lr, Deney 1'deki karşılaştırma tabanı (model, optimizer))
+ABLATIONS = [
+    ("DeepCNN+BN / SGD", "DeepCNN_BN", "SGD", 0.01, ("DeepCNN", "SGD")),
+    ("DeepCNN+BN / Momentum", "DeepCNN_BN", "Momentum", 0.01, ("DeepCNN", "Momentum")),
+    ("DeepCNN / Adam (düzeltmesiz)", "DeepCNN", "Adam-noBC", 0.001, ("DeepCNN", "Adam")),
+    ("ShallowCNN / Adam (düzeltmesiz)", "ShallowCNN", "Adam-noBC", 0.001, ("ShallowCNN", "Adam")),
+]
+
+
+def experiment_6(args, data, device):
+    print("\n" + "=" * 70)
+    print("DENEY 6: Ablasyon (BatchNorm, Adam yanlılık düzeltmesi)")
+    print("=" * 70)
+    epoch_rows, run_rows = [], []
+    total = len(ABLATIONS) * len(args.seeds)
+    k = 0
+    for label, model_name, opt, lr, _ in ABLATIONS:
+        # Yanlılık düzeltmesiz Adam'ın PyTorch karşılığı yok: daima sıfırdan uygulama
+        impl = "manual" if opt == "Adam-noBC" else args.optim_impl
+        for seed in args.seeds:
+            k += 1
+            print(f"[{k}/{total}] {label:<32} seed={seed:<4}")
+            e, _, s = run_training(model_name, opt, lr, seed, args.epochs, data,
+                                   args.batch_size, device, tag="   ", impl=impl)
+            epoch_rows += [dict(r, variant=label) for r in e]
+            run_rows.append(dict(s, variant=label))
+            save_csv(epoch_rows, os.path.join(args.results_dir, "exp6_epochs.csv"))
+            save_csv(run_rows, os.path.join(args.results_dir, "exp6_runs.csv"))
+
+    base_path = os.path.join(args.results_dir, "exp1_runs.csv")
+    base = pd.read_csv(base_path) if os.path.exists(base_path) else None
+    summary = summarize_exp6(pd.DataFrame(run_rows), pd.DataFrame(epoch_rows), base)
+    path = os.path.join(args.results_dir, "exp6_summary.csv")
+    summary.to_csv(path, index=False, encoding="utf-8-sig")
+    print("\nDeney 6 özeti:")
+    print(summary.to_string(index=False))
+    print(f"-> {path}")
+
+
+def summarize_exp6(runs_df, epochs_df, base_df=None):
+    """Ablasyon varyantı vs Deney 1 tabanı; aynı seed'lerle eşleştirilmiş t-testi."""
+    ett = epochs_to_target(epochs_df.assign(model=epochs_df.variant))
+    rows = []
+    for label, _, _, _, (bmodel, bopt) in ABLATIONS:
+        g = runs_df[runs_df.variant == label].set_index("seed")
+        if g.empty:
+            continue
+        e = ett[ett.model == label].epochs_to_target
+        row = {
+            "varyant": label,
+            "n_seeds": len(g),
+            "n_diverged": int(g.status.isin(["nan_inf", "exploded"]).sum()),
+            "final_test_acc(%)": fmt_pm(g.final_test_acc * 100, "{:.2f}"),
+            "final_train_loss": fmt_pm(g.final_train_loss),
+            f"epochs_to_{int(TARGET_ACC * 100)}%": fmt_pm(e, "{:.1f}")
+            if np.isfinite(e).any() else "ulaşılamadı",
+            "taban": f"{bmodel} / {bopt}",
+        }
+        if base_df is not None:
+            b = base_df[(base_df.model == bmodel) & (base_df.optimizer == bopt)].set_index("seed")
+            common = sorted(set(g.index) & set(b.index))
+            va = g.loc[common, "final_test_acc"].values * 100
+            vb = b.loc[common, "final_test_acc"].values * 100
+            row["taban_test_acc(%)"] = fmt_pm(vb, "{:.2f}")
+            row["fark(puan)"] = f"{np.nanmean(va - vb):+.2f}"
+            ok = len(common) > 1 and np.all(np.isfinite(va - vb)) and np.std(va - vb) > 0
+            row["paired_t_p"] = f"{stats.ttest_rel(va, vb).pvalue:.2e}" if ok else "NaN"
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def experiment_3(args, data):
@@ -490,10 +694,17 @@ def experiment_4(args):
 # ---------------------------------------------------------------------------
 def parse_args():
     p = argparse.ArgumentParser(description="CNN optimizer yakınsama/kararlılık deneyleri")
-    p.add_argument("--exp", nargs="+", choices=["1", "2", "3", "4", "all"], default=["all"],
-                   help="Çalıştırılacak deney(ler), örn. --exp 3 4")
-    p.add_argument("--epochs", type=int, default=10, help="Deney 1 epoch sayısı")
+    p.add_argument("--exp", nargs="+", choices=["1", "2", "3", "4", "5", "6", "all"],
+                   default=["all"], help="Çalıştırılacak deney(ler), örn. --exp 3 4")
+    p.add_argument("--epochs", type=int, default=10, help="Deney 1 ve 6 epoch sayısı")
     p.add_argument("--exp2-epochs", type=int, default=3, help="Deney 2 epoch sayısı")
+    p.add_argument("--exp2-seeds", type=int, default=3, help="Deney 2 seed sayısı")
+    p.add_argument("--hess-epochs", type=int, default=5, help="Deney 5: kaç epoch boyunca ölçülür")
+    p.add_argument("--hess-seeds", type=int, default=3, help="Deney 5 seed sayısı")
+    p.add_argument("--hess-samples", type=int, default=1024,
+                   help="Deney 5: λ_max'ın hesaplandığı sabit eğitim alt kümesi boyutu")
+    p.add_argument("--hess-iters", type=int, default=100, help="Kuvvet yöntemi en fazla iterasyon")
+    p.add_argument("--hess-tol", type=float, default=1e-3, help="Kuvvet yöntemi göreli tolerans")
     p.add_argument("--bench-iters", type=int, default=50, help="Deney 4 ölçülen iterasyon sayısı")
     p.add_argument("--optim-impl", choices=["manual", "torch"], default="manual",
                    help="manual: optimizers.py (sıfırdan), torch: PyTorch referansı")
@@ -530,15 +741,17 @@ def main():
     train_subset = test_subset = None
     if args.quick:
         train_subset, test_subset = 6000, 2000
-        args.epochs, args.exp2_epochs = 2, 1
+        args.epochs, args.exp2_epochs, args.hess_epochs = 2, 1, 1
         args.seeds = args.seeds[:2]
         print("HIZLI MOD: sonuçlar yalnızca kodun çalıştığını doğrulamak içindir.")
 
     os.makedirs(args.results_dir, exist_ok=True)
     data = load_fashion_mnist(device, args.data_dir, train_subset, test_subset)
 
-    exps = {"1", "2", "3", "4"} if "all" in args.exp else set(args.exp)
+    exps = {"1", "2", "3", "4", "5", "6"} if "all" in args.exp else set(args.exp)
     print(f"Optimizer uygulaması: {args.optim_impl}")
+    if exps & {"1", "2", "6"}:
+        gpu_warmup(data, device, args.batch_size)
     t0 = time.perf_counter()
     if "1" in exps:
         experiment_1(args, data, device)
@@ -548,6 +761,10 @@ def main():
         experiment_3(args, data)
     if "4" in exps:
         experiment_4(args)
+    if "5" in exps:
+        experiment_5(args, data, device)
+    if "6" in exps:
+        experiment_6(args, data, device)
     print(f"\nToplam süre: {(time.perf_counter() - t0) / 60:.1f} dk")
 
     if not args.no_plot:

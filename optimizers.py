@@ -89,12 +89,20 @@ class ManualRMSprop(Optimizer):
 
 
 class ManualAdam(Optimizer):
-    """Adam: birinci ve ikinci moment tahminleri + yanlılık düzeltmesi."""
+    """
+    Adam: birinci ve ikinci moment tahminleri + yanlılık düzeltmesi.
 
-    def __init__(self, params, lr=0.001, betas=(0.9, 0.999), eps=1e-8):
+    bias_correction=False (ABLASYON): m̂ = m, v̂ = v alınır. m_0 = v_0 = 0 başlangıcı
+    nedeniyle E[m_t] = (1 − β1^t) E[g] ve E[v_t] = (1 − β2^t) E[g²] olduğundan, düzeltme
+    yapılmazsa ilk adımın büyüklüğü η(1 − β1)/√(1 − β2) ≈ 3.16 η olur (β1=0.9, β2=0.999);
+    yani ilk iterasyonlarda etkin öğrenme oranı ~3 kat büyür.
+    """
+
+    def __init__(self, params, lr=0.001, betas=(0.9, 0.999), eps=1e-8, bias_correction=True):
         if lr <= 0 or not (0 <= betas[0] < 1 and 0 <= betas[1] < 1):
             raise ValueError("lr > 0 ve 0 <= beta < 1 olmalı")
-        super().__init__(params, dict(lr=lr, betas=betas, eps=eps))
+        super().__init__(params, dict(lr=lr, betas=betas, eps=eps,
+                                      bias_correction=bias_correction))
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -115,8 +123,11 @@ class ManualAdam(Optimizer):
                 m.lerp_(g, 1 - b1)                        # m_t = β1 m + (1−β1) g
                 v.mul_(b2).addcmul_(g, g, value=1 - b2)   # v_t = β2 v + (1−β2) g²
 
-                bc1 = 1 - b1 ** t                         # yanlılık düzeltme katsayıları
-                bc2 = 1 - b2 ** t
+                if group["bias_correction"]:
+                    bc1 = 1 - b1 ** t                     # yanlılık düzeltme katsayıları
+                    bc2 = 1 - b2 ** t
+                else:
+                    bc1 = bc2 = 1.0                       # ablasyon: düzeltme yok
                 # η m̂/(√v̂ + ε) = (η/bc1) · m / (√v/√bc2 + ε)
                 denom = (v.sqrt() / math.sqrt(bc2)).add_(eps)
                 p.addcdiv_(m, denom, value=-lr / bc1)
@@ -135,6 +146,7 @@ def make_optimizer(name: str, params, lr: float, impl: str = "manual") -> Optimi
             "Momentum": lambda: ManualSGD(params, lr=lr, momentum=0.9),
             "RMSprop": lambda: ManualRMSprop(params, lr=lr),
             "Adam": lambda: ManualAdam(params, lr=lr),
+            "Adam-noBC": lambda: ManualAdam(params, lr=lr, bias_correction=False),
         }
     elif impl == "torch":
         table = {

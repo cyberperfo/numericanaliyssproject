@@ -11,6 +11,8 @@ plots/ klasörüne kaydeder:
     time_vs_acc.png      : Toplam eğitim süresi vs son test doğruluğu
     fd_error.png         : Sonlu fark göreli hatası vs h (kesme/yuvarlama dengesi)
     cpu_gpu.png          : CPU ve GPU'da iterasyon başına süre
+    sharpness.png        : Kuvvet yöntemi yakınsaması, λ_max(∇²L) ve η_kritik = 2/λ_max
+    ablation.png         : BatchNorm ve Adam yanlılık düzeltmesi ablasyonu
 
 Kullanım:
     python plot_results.py
@@ -201,17 +203,33 @@ def plot_gradient_norm(layer_df, epochs_df, plots_dir, grad_epoch=1):
 def plot_lr_heatmap(exp2_df, plots_dir):
     lrs = sorted(exp2_df.lr.unique(), reverse=True)
     opts = [o for o in OPT_ORDER if o in set(exp2_df.optimizer)]
+    # Birden çok seed varsa hücre = seed'ler üzerinden özet:
+    #   renk/metin: sonlu koşuların ortalama doğruluğu; alt satır: başarısız seed sayıları
     acc = np.full((len(opts), len(lrs)), np.nan)
     status = np.full((len(opts), len(lrs)), "", dtype=object)
     div_ep = np.full((len(opts), len(lrs)), np.nan)
+    all_nan = np.zeros((len(opts), len(lrs)), dtype=bool)
+    n_seeds = exp2_df.groupby(["optimizer", "lr"]).size().max()
 
-    for r in exp2_df.itertuples():
-        i, j = opts.index(r.optimizer), lrs.index(r.lr)
-        acc[i, j] = r.final_test_acc * 100
-        status[i, j] = r.status
-        div_ep[i, j] = r.diverged_epoch if pd.notna(r.diverged_epoch) else np.nan
+    for (opt, lr), g in exp2_df.groupby(["optimizer", "lr"]):
+        if opt not in opts:
+            continue
+        i, j = opts.index(opt), lrs.index(lr)
+        a = g.final_test_acc.values * 100
+        acc[i, j] = np.nanmean(a) if np.isfinite(a).any() else np.nan
+        n = len(g)
+        counts = g.status.value_counts()
+        all_nan[i, j] = counts.get("nan_inf", 0) == n
+        div_ep[i, j] = g.diverged_epoch.min() if g.diverged_epoch.notna().any() else np.nan
+        if n == 1:
+            status[i, j] = g.status.iloc[0]
+        else:
+            parts = [f"{lbl} {counts[s]}/{n}" for s, lbl in
+                     (("nan_inf", "NaN"), ("exploded", "patladı"), ("stuck", "takıldı"))
+                     if counts.get(s, 0) > 0]
+            status[i, j] = "\n".join(parts)
 
-    exploded = (status == "nan_inf") | ~np.isfinite(acc)
+    exploded = all_nan | ~np.isfinite(acc)
     cmap = LinearSegmentedColormap.from_list("seq_blue", SEQ_BLUE)
     cmap.set_bad(SURFACE)
 
@@ -225,13 +243,18 @@ def plot_lr_heatmap(exp2_df, plots_dir):
                 ax.add_patch(Rectangle((j - 0.5, i - 0.5), 1, 1, facecolor=GRID,
                                        edgecolor="#a8a79d", hatch="///", linewidth=0))
                 ep = f"\nepoch {int(div_ep[i, j])}" if np.isfinite(div_ep[i, j]) else ""
-                ax.text(j, i, f"NaN/Inf{ep}", ha="center", va="center", fontsize=8.5,
+                tag = f" {n_seeds}/{n_seeds}" if n_seeds > 1 else ""
+                ax.text(j, i, f"NaN/Inf{tag}{ep}", ha="center", va="center", fontsize=8.5,
                         fontweight="bold", color=INK)
             else:
                 txt = f"{acc[i, j]:.1f}%"
                 if status[i, j] == "stuck":
                     txt += "\n(takıldı)"
-                ax.text(j, i, txt, ha="center", va="center", fontsize=9,
+                elif status[i, j] == "exploded":
+                    txt += "\n(kayıp patladı)"
+                elif status[i, j] not in ("", "stable"):
+                    txt += "\n" + status[i, j]
+                ax.text(j, i, txt, ha="center", va="center", fontsize=8 if n_seeds > 1 else 9,
                         color=SURFACE if acc[i, j] > 55 else INK)
 
     ax.set_xticks(range(len(lrs)))
@@ -254,8 +277,10 @@ def plot_lr_heatmap(exp2_df, plots_dir):
     cb.set_label("Son test doğruluğu (%)")
     cb.outline.set_visible(False)
     fig.text(0.5, -0.03,
-             "Taralı: NaN/Inf (nümerik taşma/patlama).  'takıldı': sayısal olarak sonlu "
-             "ancak doğruluk şans düzeyinde (< %15).",
+             f"{n_seeds} seed; hücre değeri: sonlu koşuların ortalama son test doğruluğu.  "
+             "Taralı: tüm seed'lerde NaN/Inf (kayan nokta taşması).\n'patladı': sonlu ama "
+             "eğitim kaybı > 10·ln10.  'takıldı': kayıp sonlu ve küçük, doğruluk şans "
+             "düzeyinde (< %15).",
              ha="center", color=MUTED, fontsize=8.5)
     fig.tight_layout()
     _save(fig, plots_dir, "lr_heatmap.png")
@@ -395,6 +420,142 @@ def plot_cpu_gpu(bench_df, plots_dir):
 
 
 # ---------------------------------------------------------------------------
+# 7) Hessian spektrumu: kuvvet yöntemi yakınsaması, λ_max ve η_kritik
+# ---------------------------------------------------------------------------
+def _exp2_boundary(exp2_df, opt="SGD"):
+    """Deney 2'de tüm seed'lerde kararlı en büyük lr ve en az bir seed'de ıraksayan en küçük lr."""
+    if exp2_df is None:
+        return None, None
+    g = exp2_df[exp2_df.optimizer == opt]
+    ok = [lr for lr, s in g.groupby("lr") if (s.status == "stable").all()]
+    bad = [lr for lr, s in g.groupby("lr") if s.status.isin(["nan_inf", "exploded"]).any()]
+    return (max(ok) if ok else None), (min(bad) if bad else None)
+
+
+def plot_sharpness(sharp_df, hist_df, plots_dir, exp2_df=None):
+    models = [m for m in MODEL_ORDER if m in set(sharp_df.model)]
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.4))
+
+    # (a) Kuvvet yönteminin yakınsaması: göreli hata |λ_k − λ_son| / |λ_son|
+    ax = axes[0]
+    if hist_df is not None and not hist_df.empty:
+        last_ep = hist_df.epoch.max()
+        for model in models:
+            st = MODEL_STYLE[model]
+            for ep, ls in ((0, ":"), (last_ep, st["linestyle"])):
+                h = hist_df[(hist_df.model == model) & (hist_df.epoch == ep)].sort_values("k")
+                if len(h) < 2:
+                    continue
+                lam = h.lambda_k.values
+                err = np.abs(lam[:-1] - lam[-1]) / max(abs(lam[-1]), 1e-30)
+                ax.plot(h.k.values[:-1], np.maximum(err, 1e-16), color=st["color"],
+                        linestyle=ls, linewidth=1.6, label=f"{model}, epoch {ep}")
+        ax.set_yscale("log")
+        ax.set_xlabel("Kuvvet yöntemi iterasyonu k")
+        ax.set_ylabel("|λ_k − λ_son| / |λ_son|")
+        ax.set_title("(a) Kuvvet yönteminin yakınsaması")
+        ax.legend(fontsize=8)
+
+    # (b) λ_max'ın eğitim boyunca değişimi
+    ax = axes[1]
+    for model in models:
+        g = sharp_df[sharp_df.model == model].groupby("epoch").lambda_max
+        m, s = g.mean(), g.std().fillna(0)
+        st = MODEL_STYLE[model]
+        ax.plot(m.index, m.values, color=st["color"], linestyle=st["linestyle"],
+                marker=st["marker"], markersize=5, label=model)
+        lo, hi = _band(m.values, s.values)
+        ax.fill_between(m.index, lo, hi, color=st["color"], alpha=0.15, linewidth=0)
+    ax.set_yscale("log")
+    ax.set_xlabel("Epoch (Momentum, η = 0.01 ile eğitim)")
+    ax.set_ylabel("λ_max(∇²L)")
+    ax.set_title("(b) Hessian'ın en büyük özdeğeri")
+    ax.legend()
+
+    # (c) Teorik kararlılık sınırı η_kritik = 2/λ_max ve Deney 2'deki deneysel sınır
+    ax = axes[2]
+    for model in models:
+        g = sharp_df[sharp_df.model == model].groupby("epoch").eta_crit_gd
+        m, s = g.mean(), g.std().fillna(0)
+        st = MODEL_STYLE[model]
+        ax.plot(m.index, m.values, color=st["color"], linestyle=st["linestyle"],
+                marker=st["marker"], markersize=5, label=f"{model}: 2/λ_max")
+    ok, bad = _exp2_boundary(exp2_df, "SGD")
+    if ok is not None:
+        ax.axhline(ok, color=OPT_COLORS["SGD"], linestyle=":", linewidth=1.3,
+                   label=f"Deney 2 (DeepCNN, SGD): kararlı η = {ok:g}")
+    if bad is not None:
+        ax.axhline(bad, color="#c0392b", linestyle=":", linewidth=1.3,
+                   label=f"Deney 2 (DeepCNN, SGD): ıraksayan η = {bad:g}")
+    ax.set_yscale("log")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("η_kritik (SGD)")
+    ax.set_title("(c) Teorik kararlılık sınırı η < 2/λ_max")
+    ax.legend(fontsize=8)
+
+    fig.text(0.5, -0.04,
+             "λ_max: Hessian–vektör çarpımı + kuvvet yöntemi, sabit 1024 örneklik eğitim alt "
+             "kümesi, seed ortalaması ± std.  Yerel ikinci derece modelde GD yalnızca "
+             "η < 2/λ_max için kararlıdır.",
+             ha="center", color=MUTED, fontsize=8.5)
+    fig.tight_layout()
+    _save(fig, plots_dir, "sharpness.png")
+
+
+# ---------------------------------------------------------------------------
+# 8) Ablasyon: BatchNorm ve Adam yanlılık düzeltmesi
+# ---------------------------------------------------------------------------
+def _mean_curve(df, col="train_loss"):
+    g = df.groupby("epoch")[col]
+    return g.mean(), g.std().fillna(0)
+
+
+def plot_ablation(exp1_epochs, exp6_epochs, plots_dir):
+    panels = [
+        ("(a) SGD: BatchNorm ablasyonu",
+         [("DeepCNN (BN yok)", exp1_epochs, dict(model="DeepCNN", optimizer="SGD"), "#eb6834", "--"),
+          ("DeepCNN + BN", exp6_epochs, dict(variant="DeepCNN+BN / SGD"), "#2a78d6", "-")]),
+        ("(b) Momentum: BatchNorm ablasyonu",
+         [("DeepCNN (BN yok)", exp1_epochs, dict(model="DeepCNN", optimizer="Momentum"), "#eb6834", "--"),
+          ("DeepCNN + BN", exp6_epochs, dict(variant="DeepCNN+BN / Momentum"), "#2a78d6", "-")]),
+        ("(c) Adam: yanlılık düzeltmesi ablasyonu",
+         [("ShallowCNN, düzeltmeli", exp1_epochs, dict(model="ShallowCNN", optimizer="Adam"), "#2a78d6", "-"),
+          ("ShallowCNN, düzeltmesiz", exp6_epochs, dict(variant="ShallowCNN / Adam (düzeltmesiz)"),
+           "#2a78d6", ":"),
+          ("DeepCNN, düzeltmeli", exp1_epochs, dict(model="DeepCNN", optimizer="Adam"), "#eb6834", "-"),
+          ("DeepCNN, düzeltmesiz", exp6_epochs, dict(variant="DeepCNN / Adam (düzeltmesiz)"),
+           "#eb6834", ":")]),
+    ]
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.3))
+    for ax, (title, lines) in zip(axes, panels):
+        for label, df, filt, color, ls in lines:
+            if df is None:
+                continue
+            sub = df
+            for k, v in filt.items():
+                if k not in sub.columns:
+                    sub = sub.iloc[0:0]
+                    break
+                sub = sub[sub[k] == v]
+            if sub.empty:
+                continue
+            m, s = _mean_curve(sub)
+            ax.plot(m.index, m.values, color=color, linestyle=ls, marker="o", markersize=3.5,
+                    label=label)
+            lo, hi = _band(m.values, s.values)
+            ax.fill_between(m.index, lo, hi, color=color, alpha=0.12, linewidth=0)
+        ax.set_yscale("log")
+        ax.set_xlabel("Epoch")
+        ax.set_title(title)
+        ax.legend(fontsize=8)
+    axes[0].set_ylabel("Eğitim kaybı (log ölçek)")
+    fig.text(0.5, -0.03, "Aynı 5 seed (aynı başlangıç ağırlıkları ve mini-batch sırası); "
+             "çizgi: ortalama, gölge: ± 1 std.", ha="center", color=MUTED, fontsize=8.5)
+    fig.tight_layout()
+    _save(fig, plots_dir, "ablation.png")
+
+
+# ---------------------------------------------------------------------------
 def _read(results_dir, name):
     path = os.path.join(results_dir, name)
     if not os.path.exists(path):
@@ -427,6 +588,14 @@ def main(results_dir="results", plots_dir="plots"):
         plot_lr_heatmap(exp2, plots_dir)
     if runs is not None:
         plot_time_vs_acc(runs, plots_dir)
+
+    sharp = _read(results_dir, "exp5_sharpness.csv")
+    hist = _read(results_dir, "exp5_power_history.csv")
+    if sharp is not None:
+        plot_sharpness(sharp, hist, plots_dir, exp2)
+    exp6 = _read(results_dir, "exp6_epochs.csv")
+    if exp6 is not None:
+        plot_ablation(epochs, exp6, plots_dir)
 
 
 if __name__ == "__main__":

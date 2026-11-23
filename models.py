@@ -74,7 +74,30 @@ class DeepCNN(nn.Module):
         return self.fc2(x)
 
 
-MODEL_REGISTRY = {"ShallowCNN": ShallowCNN, "DeepCNN": DeepCNN}
+class DeepCNN_BN(DeepCNN):
+    """
+    ABLASYON MODELİ: DeepCNN ile birebir aynı mimari, tek fark her konvolüsyondan
+    sonra BatchNorm2d. BatchNorm her katmanın çıktısını mini-batch üzerinde
+    sıfır ortalama / birim varyansa çeker:  x̂ = (x − μ_B) / √(σ²_B + ε),  y = γx̂ + β.
+    Böylece katmanlar arası ölçek küçülmesi (dolayısıyla gradyan sönmesi) engellenir.
+    DeepCNN'de SGD'nin takılmasının nedeni gerçekten sönme ise bu modelde SGD öğrenmelidir.
+    """
+
+    def __init__(self, num_classes: int = 10):
+        super().__init__(num_classes)
+        self.bns = nn.ModuleList(nn.BatchNorm2d(c) for c in self.CHANNELS[1:])
+
+    def forward(self, x):
+        for i, (conv, bn) in enumerate(zip(self.convs, self.bns)):
+            x = F.relu(bn(conv(x)))
+            if i in self.POOL_AFTER:
+                x = self.pool(x)
+        x = x.flatten(1)
+        x = F.relu(self.fc1(x))
+        return self.fc2(x)
+
+
+MODEL_REGISTRY = {"ShallowCNN": ShallowCNN, "DeepCNN": DeepCNN, "DeepCNN_BN": DeepCNN_BN}
 
 
 def build_model(name: str) -> nn.Module:
