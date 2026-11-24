@@ -88,10 +88,16 @@ def setup_style():
 
 
 def _band(mean, std, floor=1e-12):
-    """Log ölçekte çizilebilmesi için alt sınırı pozitif tutulan ± std bandı."""
+    """
+    Log ölçekte çizilebilen ± std bandı: [m²/(m+s), m+s].
+    Alt sınır, üst sınırın log ölçekte aynası (m/(1+s/m)); s ≪ m iken ≈ m − s olur,
+    s ≥ m olduğunda ise m − s ≤ 0'ın yarattığı yapay "dibe inen" bandı önler.
+    """
+    mean = np.asarray(mean, dtype=float)
     std = np.nan_to_num(np.asarray(std, dtype=float))
-    lo = np.maximum(mean - std, np.maximum(floor, np.asarray(mean) * 1e-3))
-    return lo, mean + std
+    hi = mean + std
+    lo = np.maximum(mean * mean / np.maximum(hi, floor), floor)
+    return lo, hi
 
 
 def _save(fig, plots_dir, name):
@@ -324,7 +330,7 @@ def plot_time_vs_acc(runs_df, plots_dir):
     ]
     leg1 = ax.legend(handles=opt_handles, title="Optimizer", loc="lower right")
     ax.add_artist(leg1)
-    ax.legend(handles=model_handles, title="Model", loc="lower center")
+    ax.legend(handles=model_handles, title="Model", loc="center left")
     fig.text(0.5, -0.03, "Büyük işaretçi: seed ortalaması ± std;  küçük soluk noktalar: tek tek seed'ler",
              ha="center", color=MUTED, fontsize=8.5)
     fig.tight_layout()
@@ -403,11 +409,13 @@ def plot_cpu_gpu(bench_df, plots_dir):
         ax.bar(pos, s.ms_per_iter_mean, width=width - 0.03, yerr=s.ms_per_iter_std,
                color=colors.get(d, MUTED), label=names[d], capsize=3,
                error_kw=dict(ecolor=INK, elinewidth=1))
-        for p, v, row in zip(pos, s.ms_per_iter_mean, s.itertuples()):
+        for p, v, sd, row in zip(pos, s.ms_per_iter_mean, s.ms_per_iter_std, s.itertuples()):
             label = f"{v:.1f} ms"
             if d == "cuda" and "speedup_vs_cpu" in s.columns:
                 label += f"\n×{row.speedup_vs_cpu:.1f}"
-            ax.text(p, v, label, ha="center", va="bottom", fontsize=8.5, color=INK)
+            # Etiket hata çubuğunun üstüne yazılır (çubukla çakışmasın)
+            ax.text(p, v + np.nan_to_num(sd) + 1.5, label, ha="center", va="bottom",
+                    fontsize=8.5, color=INK)
     ax.set_xticks(x)
     ax.set_xticklabels(models)
     ax.set_ylabel("İterasyon başına süre (ms)")
@@ -434,6 +442,11 @@ def _exp2_boundary(exp2_df, opt="SGD"):
 
 def plot_sharpness(sharp_df, hist_df, plots_dir, exp2_df=None):
     models = [m for m in MODEL_ORDER if m in set(sharp_df.model)]
+    # Kuvvet yöntemi mutlak değerce en büyük özdeğere yakınsar. Düzlük bölgesinde (ör.
+    # DeepCNN'in başlangıç platosu) bu negatif bir özdeğer olabilir; o zaman λ_max
+    # bilinmez ve 2/λ_max tanımsızdır. Bu ölçümler (b) ve (c)'den çıkarılır, dipnotta sayılır.
+    neg = sharp_df[sharp_df.lambda_max <= 0]
+    sharp_pos = sharp_df[sharp_df.lambda_max > 0]
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.4))
 
     # (a) Kuvvet yönteminin yakınsaması: göreli hata |λ_k − λ_son| / |λ_son|
@@ -459,7 +472,7 @@ def plot_sharpness(sharp_df, hist_df, plots_dir, exp2_df=None):
     # (b) λ_max'ın eğitim boyunca değişimi
     ax = axes[1]
     for model in models:
-        g = sharp_df[sharp_df.model == model].groupby("epoch").lambda_max
+        g = sharp_pos[sharp_pos.model == model].groupby("epoch").lambda_max
         m, s = g.mean(), g.std().fillna(0)
         st = MODEL_STYLE[model]
         ax.plot(m.index, m.values, color=st["color"], linestyle=st["linestyle"],
@@ -475,7 +488,7 @@ def plot_sharpness(sharp_df, hist_df, plots_dir, exp2_df=None):
     # (c) Teorik kararlılık sınırı η_kritik = 2/λ_max ve Deney 2'deki deneysel sınır
     ax = axes[2]
     for model in models:
-        g = sharp_df[sharp_df.model == model].groupby("epoch").eta_crit_gd
+        g = sharp_pos[sharp_pos.model == model].groupby("epoch").eta_crit_gd
         m, s = g.mean(), g.std().fillna(0)
         st = MODEL_STYLE[model]
         ax.plot(m.index, m.values, color=st["color"], linestyle=st["linestyle"],
@@ -493,11 +506,14 @@ def plot_sharpness(sharp_df, hist_df, plots_dir, exp2_df=None):
     ax.set_title("(c) Teorik kararlılık sınırı η < 2/λ_max")
     ax.legend(fontsize=8)
 
-    fig.text(0.5, -0.04,
-             "λ_max: Hessian–vektör çarpımı + kuvvet yöntemi, sabit 1024 örneklik eğitim alt "
-             "kümesi, seed ortalaması ± std.  Yerel ikinci derece modelde GD yalnızca "
-             "η < 2/λ_max için kararlıdır.",
-             ha="center", color=MUTED, fontsize=8.5)
+    note = ("λ_max: Hessian–vektör çarpımı + kuvvet yöntemi, sabit 1024 örneklik eğitim alt "
+            "kümesi, seed ortalaması ± std.  Yerel ikinci derece modelde GD yalnızca "
+            "η < 2/λ_max için kararlıdır.")
+    if not neg.empty:
+        which = ", ".join(f"{r.model} seed {r.seed} epoch {r.epoch}" for r in neg.itertuples())
+        note += (f"\n(b)–(c): kuvvet yönteminin negatif baskın özdeğer verdiği {len(neg)} ölçüm "
+                 f"hariç tutuldu ({which}).")
+    fig.text(0.5, -0.04 if neg.empty else -0.08, note, ha="center", color=MUTED, fontsize=8.5)
     fig.tight_layout()
     _save(fig, plots_dir, "sharpness.png")
 

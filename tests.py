@@ -210,10 +210,15 @@ class TestPowerIteration(unittest.TestCase):
         lam, hist = top_eigenvalue(lambda: 0.5 * x @ A @ x, [x], n_iter=200, tol=1e-12)
         self.assertAlmostEqual(lam, 5.0, places=8)
         # Rayleigh bölümü hatası ~ (λ2/λ1)^{2k} = 0.36^k: geometrik (doğrusal) yakınsama.
-        # 5 iterasyonda hata en az 0.5^5 kat azalmalı (kuramsal: 0.36^5 ≈ 0.006).
+        # Bu oran yalnızca ASİMPTOTİK bölgede geçerlidir: ilk iterasyonlarda v0'ın küçük
+        # özdeğer bileşenleri baskındır, sonda ise hata yuvarlama tabanına oturur. Bu yüzden
+        # hız, 1e-10 < hata < 1e-3 penceresinde ardışık oranların geometrik ortalamasıyla
+        # ölçülür (A pozitif tanımlı olduğundan λ_k monoton artar; pencere kesintisizdir).
         err = [abs(h - 5.0) for h in hist]
-        self.assertGreater(len(err), 10)
-        self.assertLess(err[10] / err[5], 0.5 ** 5)
+        win = [e for e in err if 1e-10 < e < 1e-3]
+        self.assertGreaterEqual(len(win), 5)
+        rate = (win[-1] / win[0]) ** (1.0 / (len(win) - 1))
+        self.assertAlmostEqual(rate, (3.0 / 5.0) ** 2, delta=0.05)
 
     def test_hvp_matches_explicit_hessian(self):
         g = torch.Generator().manual_seed(1)

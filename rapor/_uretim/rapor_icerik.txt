@@ -1,0 +1,273 @@
+// ======================= KAPAK =======================
+CTR 13|1|İSTANBUL MEDENİYET ÜNİVERSİTESİ
+CTR 12|0|Bilgisayar Mühendisliği Bölümü
+SP 2
+CTR 14|1|MAT353 – NÜMERİK ANALİZ
+CTR 12|0|Dönem Projesi Raporu · 2026–2027 Güz Dönemi
+SP 2
+CTR 18|1|Evrişimli Sinir Ağlarında Birinci Mertebe Optimizasyon Yöntemlerinin Yakınsama ve Nümerik Kararlılık Analizi
+CTR 13|0|Gradyan Sönmesi, Hessian Spektrumu ve Sonlu Fark Hata Analizi
+SP 3
+CTR 12|1|Hazırlayanlar
+CTR 12|0|[Ad Soyad] – [Öğrenci No]
+CTR 12|0|[Ad Soyad] – [Öğrenci No]
+CTR 12|0|[Ad Soyad] – [Öğrenci No]
+SP 1
+CTR 12|1|Öğretim Üyesi
+CTR 12|0|Doç. Dr. Murat GEZER
+SP 3
+CTR 12|0|Aralık 2026
+PB
+// ======================= ÖZET =======================
+H1 Özet
+P Derin öğrenme modellerinin eğitimi, yüksek boyutlu ve konveks olmayan bir kayıp fonksiyonunun birinci mertebe gradyan yöntemleriyle minimize edilmesi problemidir. Bu çalışmada SGD, ağır top momentumu, RMSprop ve Adam algoritmaları formüllerinden sıfırdan uygulanmış ve Fashion-MNIST görüntü sınıflandırma problemi üzerinde, üç konvolüsyon katmanlı sığ bir ağ ile normalizasyon katmanı içermeyen sekiz konvolüsyon katmanlı derin bir ağda karşılaştırılmıştır. Yakınsama hızı beş farklı tohum değeriyle ortalama ± standart sapma olarak; öğrenme oranı duyarlılığı ve nümerik patlama (NaN/Inf) ise beş öğrenme oranı ve üç tohumdan oluşan bir ızgarada incelenmiştir. Geri yayılım gradyanları merkezi sonlu farkla float32 ve float64 aritmetiğinde doğrulanmış, kesme ve yuvarlama hatalarının dengesi deneysel olarak gösterilmiştir. Kayıp fonksiyonunun Hessian matrisinin en büyük özdeğeri Hessian–vektör çarpımı ve kuvvet yöntemiyle eğitim boyunca kestirilmiş, gradyan inişinin η < 2/λmax kararlılık koşulu deneysel ıraksama sınırıyla karşılaştırılmıştır. Sığ ağda dört yöntem de %86–92 test doğruluğuna ulaşmıştır. Derin ağda ise SGD, ilk ve son katman gradyan normları arasındaki yaklaşık yüz katlık fark nedeniyle öğrenememiş (%18,7 ± 9,3), uyarlamalı yöntemler ilk iki epoch içinde %85 doğruluğu aşmıştır. BatchNorm eklenmesi SGD'nin doğruluğunu 72 puan artırmış (eşleştirilmiş t-testi, p < 10⁻⁴) ve gradyan sönmesinin temel neden olduğunu doğrulamıştır. float64 aritmetiğinde sonlu fark hatası, h* ≈ ∛ε kuramsal öngörüsüyle uyumlu biçimde 10⁻⁸ mertebesine inmiştir. Tesla T4 GPU, CPU'ya göre yaklaşık 20 kat hızlanma sağlamıştır.
+P **Anahtar kelimeler:** stokastik gradyan inişi, Adam, gradyan sönmesi, kuvvet yöntemi, sonlu farklar, nümerik kararlılık.
+// ======================= 1. GİRİŞ =======================
+H1 1. Giriş
+H2 1.1 Problem ve Gerçek Dünyadaki Karşılığı
+P Görüntü sınıflandırma; tıbbi görüntülemeden üretim hattında kalite kontrolüne ve otonom sürüşe kadar pek çok uygulamada evrişimli sinir ağlarıyla (CNN) çözülmektedir. Bir CNN'in eğitimi, nümerik analiz açısından, P ≈ 10⁵–10⁹ boyutlu, konveks olmayan ve yalnızca gürültülü gradyan örnekleriyle erişilebilen bir kayıp fonksiyonunun minimizasyonudur. Bu ölçekte Newton yöntemi gibi ikinci mertebe yöntemler doğrudan uygulanamaz: bu çalışmadaki derin model için Hessian matrisi P² ≈ 2,4·10¹¹ elemandan oluşur ve float64 ile yaklaşık 1,9 TB bellek gerektirir. Bu nedenle pratikte yalnızca gradyanı kullanan birinci mertebe yöntemler tercih edilir [@bottou].
+P Bu problemin üç nümerik zorluğu vardır: (i) adım boyu (öğrenme oranı) η'nın seçimi: küçük η yakınsamayı yavaşlatır, büyük η iterasyonu ıraksatır ve kayan nokta taşmasına (NaN/Inf) yol açar; (ii) derin ağlarda geri yayılım sırasında gradyanların katmandan katmana çarpılarak üstel biçimde küçülmesi, yani gradyan sönmesi [@bengio94]; (iii) gradyanın doğruluğu ve kayan nokta hassasiyetinin (float32/float64) sonuca etkisi.
+H2 1.2 Literatürdeki Yaklaşımlar
+P Stokastik gradyan inişi (SGD), Robbins ve Monro'nun stokastik yaklaşıklık yöntemine dayanır [@robbins]. Adım başına maliyeti düşüktür ve azalan adım boyuyla yakınsaması kanıtlanmıştır; ancak kötü koşullanmış problemlerde yavaştır ve tek bir global η'ya duyarlıdır [@bottou]. Polyak'ın ağır top (heavy-ball) momentumu [@polyak], geçmiş gradyanların üstel ortalamasını kullanarak dar vadilerdeki salınımı azaltır ve yakınsamayı hızlandırır, buna karşılık ek bir hiperparametre (μ) getirir. RMSprop [@tieleman] ve Adam [@kingma] gibi uyarlamalı yöntemler, gradyan karelerinin hareketli ortalamasıyla her parametre için ayrı bir etkin adım boyu hesaplar; ölçek farklarına dayanıklıdır ve az ayar gerektirir. Öte yandan Adam'ın bazı problemlerde yakınsamadığı [@reddi] ve uyarlamalı yöntemlerin genelleme başarısının SGD'nin gerisinde kalabildiği [@wilson] gösterilmiştir.
+P Derin ağlarda gradyan sönmesi uzun süredir bilinen bir sorundur [@bengio94]. Glorot ve Bengio, ağırlık başlatmanın katmanlar arası varyansı korumadaki rolünü göstermiş [@glorot]; Ioffe ve Szegedy her katmanın çıktısını normalize eden BatchNorm'u önermiştir [@ioffe]. Kararlılık açısından, ikinci derece yaklaşımla gradyan inişinin ancak $η<2∕λ_max$ iken kararlı olduğu bilinir [@nocedal]; Cohen ve ark. ise sinir ağı eğitiminin bu sınırın tam kıyısında ilerlediğini (__edge of stability__) göstermiştir [@cohen]. Hessian'ı açıkça kurmadan Hessian–vektör çarpımını iki geri yayılımla hesaplayan Pearlmutter yöntemi [@pearlmutter], kuvvet yöntemiyle [@golub] birleştirildiğinde $λ_max$'ın büyük modellerde kestirilmesini mümkün kılar. Otomatik türevi doğrulamakta kullanılan sonlu farkların optimum adımı ise kesme ve yuvarlama hatalarının dengesiyle belirlenir [@nocedal]. Tablo 1 incelenen yöntemlerin güçlü ve zayıf yönlerini özetler.
+TAB **Tablo 1.** İncelenen optimizasyon yöntemlerinin güçlü ve zayıf yönleri|2.6,6.7,6.7|L
+| Yöntem | Güçlü yönler | Zayıf yönler |
+| SGD [@robbins] | Ek bellek yok, basit, iyi genelleme [@wilson] | Tek global η; ölçek farklarına ve kötü koşullanmaya duyarlı |
+| Momentum [@polyak] | Vadi boyunca hızlanma, salınımın sönümlenmesi | Ek O(P) bellek; büyük η'da aşma ve ıraksama |
+| RMSprop [@tieleman] | Parametre bazlı ölçekleme, sönmüş gradyanlara dayanıklı | Yanlılık düzeltmesi yok; ilk adım η'nın 10 katı (Denk. 10) |
+| Adam [@kingma] | Momentum, ölçekleme ve yanlılık düzeltmesi; az ayar | O(2P) ek bellek; bazı problemlerde yakınsamama [@reddi] |
+ENDTAB
+H2 1.3 Çalışmanın Amacı ve Özgün Katkıları
+P Bu çalışmanın amacı, dört birinci mertebe yöntemi yalnızca son doğruluk bakımından değil; gradyan doğrulaması, hata analizi, spektral kararlılık analizi ve istatistiksel anlamlılık gibi nümerik analiz araçlarıyla karşılaştırmaktır. Veri olarak Fashion-MNIST [@xiao], model olarak sığ (3 konvolüsyon) ve normalizasyonsuz derin (8 konvolüsyon) iki CNN kullanılmıştır. Çalışmanın özgün katkıları şunlardır:
+B Dört optimizer formüllerinden sıfırdan yazılmış ve PyTorch referans uygulamasıyla kayan nokta hassasiyetinde eşleştiği birim testleriyle doğrulanmıştır.
+B Gradyan sönmesi katman bazlı gradyan normlarıyla ölçülmüş, nedeni BatchNorm ablasyonu ve eşleştirilmiş t-testiyle istatistiksel olarak doğrulanmıştır.
+B Hessian'ın en büyük özdeğeri eğitim boyunca kuvvet yöntemiyle izlenmiş, $η<2∕λ_max$ kuramsal sınırı deneysel ıraksama sınırıyla karşılaştırılmıştır.
+B Merkezi sonlu farkın kesme/yuvarlama hata dengesi float32 ve float64'te ölçülmüş, $h^*∼ε_mach^(1∕3)$ öngörüsü sınanmıştır.
+// ======================= 2. YÖNTEM =======================
+H1 2. Yöntem
+H2 2.1 Problemin Matematiksel Modeli
+P Eğitim kümesi {(xᵢ, yᵢ)}, i = 1, …, N (N = 60 000), $x_i∈ℝ^(28×28)$ gri seviye görüntüler ve yᵢ ∈ {0, …, 9} sınıf etiketleri olsun. $f(x;θ)∈ℝ^10$ logit üreten CNN ve $θ∈ℝ^P$ tüm ağırlıklar olmak üzere eğitim, ortalama çapraz entropi kaybının minimizasyonudur:
+EQ L(θ)=1/N ∑_(i=1)^N▒ℓ(f(x_i;θ),y_i ), ℓ(z,y)=−ln⁡〖(e^(z_y))/(∑_(c=1)^10▒e^(z_c ) )〗#(1)
+P Her iterasyonda B = 128 örneklik rastgele bir mini-batch $ℬ_t$ üzerinden hesaplanan gradyan, tam gradyanın yansız bir kestirimidir:
+EQ g_t=1/B ∑_(i∈ℬ_t)▒∇_θ ℓ_i (θ_(t−1) ), 𝔼[g_t ]=∇L(θ_(t−1) )#(2)
+P İki mimari kullanılmıştır. **ShallowCNN:** 3×3 çekirdekli 3 konvolüsyon (32–64–64 kanal), iki MaxPool ve iki tam bağlantılı katman (3136→128→10); 458 570 parametre. **DeepCNN:** 8 konvolüsyon (16–16–32–32–32–32–64–64 kanal), 2. ve 4. konvolüsyondan sonra MaxPool ve aynı tam bağlantılı katmanlar; 493 114 parametre ve **hiçbir normalizasyon katmanı yoktur**. Ablasyon için her konvolüsyondan sonra BatchNorm eklenmiş **DeepCNN+BN** (493 690 parametre) kullanılmıştır. Tüm aktivasyonlar ReLU'dur ve ağırlıklar PyTorch'un varsayılan başlatmasıyla (kaiming-uniform, a = √5) başlatılır.
+H2 2.2 Geri Yayılım ve Gradyan Sönmesi
+P Katman l'nin çıktısı $h^((l))$ ve ReLU türevlerinin köşegen matrisi $D^((l))="diag"(σ′(z^((l))))$ olmak üzere zincir kuralı, katman gradyanlarını ardışık çarpımlarla verir:
+EQ (∂L)/(∂h^((l)) )=(W^((l+1)))^⊤ D^((l+1))〖(∂L)/(∂h^((l+1)) )〗  ⇒  ‖(∂L)/(∂h^((1)) )‖≤(∏_(l=2)^(L_d)▒〖‖W^((l))‖ ‖D^((l))‖〗)‖(∂L)/(∂h^((L_d)) )‖#(3)
+P Çarpımdaki çarpanlar 1'den küçükse ilk katmanların gradyanı derinlikle üstel olarak küçülür. Varsayılan başlatmada ağırlıklar $U(−b,b)$, $b=1∕√(n_in )$ dağılımından çekilir. ReLU'nun girdilerin yarısını sıfırladığı da hesaba katıldığında katman başına varyans kazancı şöyledir:
+EQ "Var"(W)=b^2/3=1/(3n_in ), "Var"(h^((l)))≈n_in "Var"(W)⋅1/2⋅"Var"(h^((l−1)))=1/6 "Var"(h^((l−1)))#(4)
+P Varyansı koruyan başlatmayla ($"Var"(W)=2∕n_in$ [@he2015]) karşılaştırıldığında sinyal her katmanda varyansta 6 kat, genlikte yaklaşık 2,4 kat zayıflar. Sekiz konvolüsyonlu ağda bu etki birikir ve Bölüm 4.2'de ölçülen, ilk ve son katman gradyanları arasındaki yaklaşık yüz katlık farkın temel nedenidir. BatchNorm, her katmanın çıktısını mini-batch üzerinde sıfır ortalama ve birim varyansa getirerek bu birikimi doğrudan engeller [@ioffe].
+H2 2.3 Optimizasyon Algoritmaları
+P $g_t$ mini-batch gradyanı, ⊙ eleman bazlı çarpım ve $ε=10^(−8)$ olmak üzere uygulanan güncelleme kuralları aşağıdadır; tüm durum vektörleri sıfırla başlar.
+EQ θ_t=θ_(t−1)−η g_t  ("SGD")#(5)
+EQ v_t=μ v_(t−1)+g_t, θ_t=θ_(t−1)−η v_t, μ=0,9  ("Momentum")#(6)
+EQ s_t=α s_(t−1)+(1−α) g_t⊙g_t, θ_t=θ_(t−1)−η g_t/(√(s_t )+ε), α=0,99  ("RMSprop")#(7)
+EQ m_t=β_1 m_(t−1)+(1−β_1 ) g_t, v_t=β_2 v_(t−1)+(1−β_2 ) g_t⊙g_t, β_1=0,9, β_2=0,999#(8)
+EQ m̂_t=m_t/(1−β_1^t ), v̂_t=v_t/(1−β_2^t ), θ_t=θ_(t−1)−η m̂_t/(√(v̂_t )+ε)  ("Adam")#(9)
+P Moment tahminleri sıfırdan başladığı için, durağan gradyan varsayımı altında $𝔼[m_t]=(1−β_1^t)𝔼[g]$ ve $𝔼[v_t]=(1−β_2^t)𝔼[g⊙g]$ olur; (9)'daki yanlılık düzeltmesi bu küçülmeyi giderir. Bunun bir sonucu olarak ilk adımda (t = 1) her koordinattaki adım büyüklüğü yöntemden yönteme belirgin biçimde farklıdır:
+EQ |Δθ|_(t=1)=η ("Adam"), (η(1−β_1))/√(1−β_2 )≈3,16η ("düzeltmesiz Adam"), η/√(1−α)=10η ("RMSprop")#(10)
+P Bu büyüklükler gradyanın ölçeğinden bağımsızdır. Uyarlamalı yöntemler bu sayede sönmüş gradyanlı katmanlarda bile η mertebesinde adım atar; bu, sönmeye karşı dayanıklılıklarının kaynağıdır. Ancak aynı nedenle büyük η'da tüm parametreleri aynı anda büyük miktarda değiştirirler.
+H2 2.4 Kararlılık Analizi ve Kuvvet Yöntemi
+P Bir yerel minimum θ* çevresinde ikinci derece Taylor yaklaşımı ve $H=∇^2 L(θ^*)$ ile gradyan inişinin hata vektörü $e_k=θ_k−θ^*$ doğrusal bir yinelemeye uyar:
+EQ L(θ)≈L(θ^*)+1/2 (θ−θ^*)^⊤ H(θ−θ^*), e_(k+1)=(I−ηH) e_k#(11)
+P Yineleme matrisinin özdeğerleri $1−ηλ_i$ olduğundan spektral yarıçap koşulu kararlılık sınırını verir; ağır top momentumu için sınır (1 + μ) kat genişler:
+EQ ρ(I−ηH)<1  ⇔  0<η<2/λ_max , η_krit^mom=(2(1+μ))/λ_max#(12)
+P $H∈ℝ^(P×P)$ açıkça oluşturulamayacağından Hessian–vektör çarpımı, gradyanın v yönündeki türevi olarak iki geri yayılımla hesaplanır [@pearlmutter]:
+EQ Hv=∇_θ (∇_θ L(θ)⋅v)#(13)
+P En büyük özdeğer, (13) kuvvet yöntemiyle [@golub] birleştirilerek bulunur (Algoritma 1). H simetrik ve $|λ_1|>|λ_2|$ ise Rayleigh bölümünün hatası geometrik olarak azalır:
+EQ w_k=Hv_(k−1), λ_k=v_(k−1)^⊤ w_k, v_k=w_k/‖w_k ‖_2 , |λ_k−λ_1 |=O(|λ_2/λ_1 |^2k)#(14)
+P Yakınsama hızı spektral boşluğa, yani $|λ_2∕λ_1|$ oranına bağlıdır; oran 1'e yakınsa çok sayıda iterasyon gerekir. Kuvvet yöntemi mutlak değerce en büyük özdeğere yakınsadığından, konveks olmayan bölgelerde negatif bir özdeğer de döndürebilir; bu durumda $η_krit$ tanımsız kabul edilir (Bölüm 6).
+CODE **Algoritma 1.** Kuvvet yöntemi ile λmax ve kararlılık sınırının kestirimi
+Girdi : kayıp L, parametreler θ ∈ ℝ^P, Kmax = 100, tol = 1e-3
+1  v ← randn(P);  v ← v / ‖v‖₂
+2  for k = 1, …, Kmax:
+3      w  ← ∇θ( ∇θL(θ) · v )            ▷ Hessian–vektör çarpımı, Denk. (13)
+4      λk ← vᵀ w                         ▷ Rayleigh bölümü
+5      if ‖w‖₂ = 0: break                ▷ ölü ağ
+6      v  ← w / ‖w‖₂
+7      if |λk − λk−1| ≤ tol·|λk|: break
+8  return λk ,  ηkrit = 2/λk  (λk > 0 ise; aksi hâlde tanımsız)
+ENDCODE
+H2 2.5 Sonlu Fark ile Gradyan Doğrulaması ve Hata Analizi
+P Geri yayılımın doğruluğu, birim normlu rastgele bir v yönündeki yönlü türevin merkezi sonlu farkla karşılaştırılmasıyla sınanır:
+EQ D_h=(L(θ+hv)−L(θ−hv))/2h, D_v L=∇L(θ)⋅v, ‖v‖_2=1#(15)
+P Taylor açılımında çift dereceli terimler sadeleştiği için kesme hatası $O(h^2)$'dir. Kayıp değerleri ise $ε_mach |L|$ mertebesinde yuvarlama hatası taşır ve bu hata 2h'ye bölünerek büyür. Toplam hata ve onu minimize eden adım [@nocedal]:
+EQ |D_h−D_v L|≈h^2/6 |L‴|+(ε_mach |L|)/h, h^*=((3ε_mach |L|)/|L‴| )^(1∕3)∼ε_mach^(1∕3)#(16)
+P float64 için ($ε_mach≈2,2⋅10^(−16)$) $h^*∼6⋅10^(−6)$, float32 için ($ε_mach≈1,2⋅10^(−7)$) $h^*∼5⋅10^(−3)$ beklenir. Log-log grafikte hata eğrisinin sağ kolunun eğimi +2, sol kolunun eğimi −1 olmalıdır.
+H2 2.6 Karmaşıklık Analizi
+P C bir örneğin ileri geçiş maliyeti (FLOP), P parametre sayısı, Nₛ Hessian kestiriminde kullanılan örnek sayısı ve K kuvvet yöntemi iterasyon sayısı olsun. Geri yayılım ileri geçişin yaklaşık iki katı maliyetlidir; dolayısıyla bir epoch O(N·C) zaman alır. Tablo 2 kullanılan işlemlerin maliyetlerini özetler.
+TAB **Tablo 2.** Kullanılan işlemlerin zaman ve bellek karmaşıklığı|6.4,4.8,4.8|L
+| İşlem | Zaman | Ek bellek |
+| İleri + geri yayılım (bir mini-batch) | O(B·C) | O(B·A), A: aktivasyon sayısı |
+| SGD / Momentum / RMSprop / Adam adımı | O(P) | O(1) / O(P) / O(P) / O(2P) |
+| Hessian–vektör çarpımı, Denk. (13) | ≈ 2 gradyan: O(Nₛ·C) | O(P) |
+| Kuvvet yöntemi, K iterasyon | O(K·Nₛ·C) | O(P) |
+| Açık Hessian + özdeğer ayrışımı | O(P³) ≈ 1,2·10¹⁷ işlem | O(P²) ≈ 1,9 TB |
+| Merkezi sonlu fark, M adım boyu | O(M·n·C), n = 32 örnek | O(P) |
+ENDTAB
+P Optimizer adımlarının O(P) maliyeti ileri/geri yayılımın yanında küçüktür. Kuvvet yöntemi bir epoch'a göre ucuzdur (Nₛ = 1024 ≪ N), açık Hessian ise P ≈ 4,9·10⁵ için olanaksızdır.
+H2 2.7 Kullanılan Teknolojiler
+P **PyTorch** [@paszke], otomatik türev (geri yayılım ve (13)'teki ikinci türev için create_graph), CUDA üzerinde GPU hesaplaması ve float32/float64 desteği nedeniyle seçilmiştir. Optimizer'lar PyTorch'un Optimizer arayüzüyle yazılmış, ancak güncelleme kuralları hazır sınıflar kullanılmadan uygulanmıştır. **NumPy** sayısal özetler, **SciPy** eşleştirilmiş t-testi ve t-dağılımı güven aralıkları, **pandas** sonuç tabloları, **Matplotlib** 300 DPI grafikler için kullanılmıştır. Deneyler **Google Colab** üzerinde NVIDIA Tesla T4 ve L4 GPU'larında çalıştırılmıştır.
+// ======================= 3. UYGULAMA =======================
+H1 3. Uygulama
+H2 3.1 Veri Kümesi ve Ön İşleme
+P Fashion-MNIST [@xiao], 10 giyim sınıfına ait 28×28 gri seviye görüntülerden oluşan dengeli bir veri kümesidir (60 000 eğitim, 10 000 test). MNIST'ten daha zor olduğu ve sığ/derin ağ farkını görünür kıldığı için seçilmiştir. Görüntüler [0, 1] aralığına ölçeklenip eğitim kümesinin ortalaması ve standart sapmasıyla normalize edilmiştir: x̃ = (x − 0,2860)/0,3530. Veri kümesi bir kez GPU belleğine yüklenir; B = 128 ile bir epoch 469 iterasyondur. Farkların yalnızca optimizasyon yönteminden kaynaklanması için veri artırma kullanılmamıştır.
+H2 3.2 Yazılım Mimarisi
+P Proje, Colab defterine gömülü yedi Python modülünden oluşur: __optimizers.py__ (Denk. 5–9), __models.py__ (üç mimari), __gradient_check.py__ (Denk. 15–16), __hessian.py__ (Denk. 13–14, Algoritma 1), __experiments.py__ (Deney 1–6), __plot_results.py__ (grafikler) ve __tests.py__ (23 birim testi). Deneyler sonuçlarını CSV dosyalarına yazar; grafikler yalnızca bu dosyalardan üretildiği için sonuçlar yeniden eğitim yapılmadan denetlenebilir.
+H2 3.3 Deney Tasarımı ve Parametre Seçimleri
+TAB **Tablo 3.** Deney tasarımı|1.0,5.0,10.0|L
+| No | Soru | Yapılandırma |
+| 1 | Yakınsama hızı ve tohum kararlılığı | 2 model × 4 yöntem × 5 tohum × 10 epoch; η: SGD ve Momentum 0,01, RMSprop ve Adam 0,001 |
+| 2 | Öğrenme oranı duyarlılığı, nümerik patlama | DeepCNN; 4 yöntem × η ∈ {0,5; 0,1; 0,01; 0,001; 0,0001} × 3 tohum × 3 epoch |
+| 3 | Gradyan doğrulaması, sonlu fark hatası | 2 model, 32 test örneği, h ∈ [10⁻¹², 1] aralığında 25 değer; float64 ve float32 (CPU) |
+| 4 | CPU–GPU performansı | B = 128, Adam adımı dahil; 5 ısınma ve 50 ölçüm iterasyonu |
+| 5 | Hessian spektrumu ve kararlılık sınırı | 2 model × 3 tohum; Momentum (η = 0,01) ile eğitim, 0–5. epoch; Nₛ = 1024, Kmax = 100, tol = 10⁻³ |
+| 6 | Ablasyon: BatchNorm, yanlılık düzeltmesi | Deney 1 ile aynı 5 tohum ve 10 epoch; eşleştirilmiş t-testi |
+ENDTAB
+P Deney 1'deki öğrenme oranları her yöntem için literatürdeki yaygın varsayılanlardır [@kingma; @bottou]; böylece her yöntem önerilen ayarıyla karşılaştırılır. Kararlılık sınırı Deney 2'deki ızgarayla ayrıca taranmıştır. Yakınsama hızı, test doğruluğunun ilk kez %85'e ulaştığı epoch ve iterasyon sayısıyla ölçülmüştür.
+H2 3.4 Varsayımlar, Sayısal Hassasiyet ve Tekrarlanabilirlik
+B **Tekrarlanabilirlik:** Tohum değerleri 42, 100, 2024, 7 ve 99'dur. Python, NumPy ve PyTorch (CPU ve CUDA) rastgele sayı üreteçleri sabitlenmiş, cuDNN deterministik modda çalıştırılmıştır. Aynı tohumla tüm yöntemler aynı başlangıç ağırlıklarını ve aynı mini-batch sırasını görür; bu, Deney 6'daki eşleştirilmiş testi mümkün kılar.
+B **Hassasiyet:** Eğitim GPU'da float32 ile yapılır. Sonlu fark deneyi CPU'da float64 ve float32 ile tekrarlanır ve referans her zaman float64 otomatik türevdir. Gradyan normları float64'te toplanır.
+B **İstatistik:** Sonuçlar n koşunun ortalaması ± örneklem standart sapmasıdır. %95 güven aralığı t-dağılımıyla, iki yöntemin farkı ise aynı tohumlu koşuların farkları dᵢ üzerinden eşleştirilmiş t-testiyle değerlendirilir:
+EQ "GA"_95=x̄±t_(0,975;n−1) s/√n, t=d̄/(s_d∕√n), n=5#(17)
+B **Koşu durumları:** Kayıp veya herhangi bir gradyan normu NaN/Inf olursa koşu durdurulur (NaN/Inf). Sonlu kalıp eğitim kaybı 10·ln 10 ≈ 23'ü aşan ve şans düzeyinde kalan koşular "patladı", kaybı patlamadan doğruluğu %15'in altında kalanlar "takıldı" olarak sınıflandırılır.
+B **Donanım:** Deney 1, 3 ve 4 Tesla T4 (2 vCPU), Deney 2, 5 ve 6 NVIDIA L4 GPU'lu Colab oturumlarında çalıştırılmıştır; mutlak süreler yalnızca aynı deney içinde karşılaştırılmıştır. Yazılım: Python 3.13, PyTorch 2.14 (CUDA 13.0), NumPy 2.4, SciPy 1.16.
+H2 3.5 Kod Örnekleri
+P Aşağıda Adam güncellemesinin (Denk. 8–9) ve kuvvet yönteminin (Algoritma 1) çekirdek kodları verilmiştir. Kodun tamamı Colab defterindedir.
+CODE **Kod 1.** Sıfırdan Adam adımı (optimizers.py)
+state["t"] += 1
+t, m, v = state["t"], state["m"], state["v"]
+m.lerp_(g, 1 - b1)                          # m_t = β1·m + (1 − β1)·g
+v.mul_(b2).addcmul_(g, g, value=1 - b2)     # v_t = β2·v + (1 − β2)·g*g
+if group["bias_correction"]:
+    bc1, bc2 = 1 - b1 ** t, 1 - b2 ** t     # yanlılık düzeltme katsayıları
+else:
+    bc1 = bc2 = 1.0                         # ablasyon: düzeltme yok
+denom = (v.sqrt() / math.sqrt(bc2)).add_(eps)   # √v̂_t + ε
+p.addcdiv_(m, denom, value=-lr / bc1)       # θ ← θ − η·m̂_t / (√v̂_t + ε)
+ENDCODE
+CODE **Kod 2.** Hessian–vektör çarpımı ve kuvvet yöntemi (hessian.py)
+def hvp(loss_fn, params, vec):
+    loss = loss_fn()
+    grads = torch.autograd.grad(loss, params, create_graph=True)
+    return torch.autograd.grad(_dot(grads, vec), params)       # Hv, Denk. (13)
+# top_eigenvalue(): kuvvet yöntemi döngüsü
+for _ in range(n_iter):
+    w = hvp(loss_fn, params, v)
+    lam = float(_dot(v, w))                   # Rayleigh bölümü vᵀHv
+    history.append(lam)
+    norm = float(torch.sqrt(_dot(w, w)))
+    if norm == 0.0:
+        break
+    v = [x.detach() / norm for x in w]
+    if len(history) > 1 and abs(history[-1] - history[-2]) <= tol * abs(history[-1]):
+        break
+ENDCODE
+// ======================= 4. DENEYSEL SONUÇLAR =======================
+H1 4. Deneysel Sonuçlar
+H2 4.1 Yakınsama Hızı ve Tohum Kararlılığı (Deney 1)
+TAB **Tablo 4.** Deney 1 sonuçları: 5 tohumun ortalaması ± standart sapması (10 epoch)|2.0,1.8,1.1,2.3,1.4,1.7,1.9,2.1,1.2
+| Model | Yöntem | η | Test doğruluğu (%) | %95 GA | %85'e epoch | %85'e iterasyon | Son eğitim kaybı | Süre (s) |
+| ShallowCNN | SGD | 0,01 | 86,02 ± 0,78 | ± 0,97 | 8,0 ± 0,7 | 3752 ± 332 | 0,360 ± 0,005 | 20,3 |
+| ShallowCNN | Momentum | 0,01 | 91,30 ± 0,52 | ± 0,64 | 2,0 ± 0,0 | 938 ± 0 | 0,176 ± 0,002 | 21,1 |
+| ShallowCNN | RMSprop | 0,001 | 91,47 ± 0,71 | ± 0,88 | 1,2 ± 0,4 | 563 ± 210 | 0,095 ± 0,004 | 22,4 |
+| ShallowCNN | Adam | 0,001 | **91,78 ± 0,27** | ± 0,34 | **1,0 ± 0,0** | **469 ± 0** | 0,098 ± 0,004 | 23,7 |
+| DeepCNN | SGD | 0,01 | 18,66 ± 9,33 | ± 11,58 | – (0/5) | – | 2,302 ± 0,001 | 30,8 |
+| DeepCNN | Momentum | 0,01 | 90,40 ± 0,18 | ± 0,22 | 4,4 ± 0,5 | 2064 ± 257 | 0,228 ± 0,008 | 32,5 |
+| DeepCNN | RMSprop | 0,001 | 91,21 ± 0,44 | ± 0,54 | 2,2 ± 0,4 | 1032 ± 210 | 0,158 ± 0,009 | 34,9 |
+| DeepCNN | Adam | 0,001 | **91,50 ± 0,44** | ± 0,54 | **2,0 ± 0,0** | **938 ± 0** | 0,159 ± 0,004 | 38,0 |
+ENDTAB
+P Tablo 4 ve Şekil 1'e göre sığ ağda dört yöntemin tamamı öğrenmektedir. Uyarlamalı yöntemler %85 doğruluğa ilk epoch içinde (469–563 iterasyon), Momentum 2 epoch'ta, SGD ise ancak 8,0 ± 0,7 epoch'ta ulaşır; yani Adam SGD'den yaklaşık 8 kat daha az iterasyon gerektirir. Son doğruluklar Momentum, RMSprop ve Adam için %91,3–91,8 bandındadır ve farklar tohumlar arası sapma mertebesindedir. Derin ağda tablo değişir: SGD 10 epoch boyunca kaybı ln 10 ≈ 2,303 düzeyinden ayıramaz ve doğruluğu %18,7 ± 9,3'te kalır; beş tohumun hiçbiri %85'e ulaşamaz. Momentum ilk 1–2 epoch boyunca aynı platoda kalır ve tohuma bağlı olarak ani biçimde kurtulur; Şekil 1'deki geniş standart sapma bandı bu geçişin tohumlar arasında 2. ile 3. epoch'a dağılmasından kaynaklanır. RMSprop ve Adam ise derinlikten neredeyse etkilenmez (%91,2 ve %91,5). Varyasyon katsayısı en düşük yöntem Adam'dır (sığ ağda %0,30), yani tohuma en az duyarlı yöntem odur.
+FIG loss_convergence.png|13.0|**Şekil 1.** Eğitim kaybının epoch'a göre değişimi (log ölçek). Çizgi 5 tohumun ortalaması, gölge ±1 standart sapmadır.
+H2 4.2 Katman Bazlı Gradyan Normları
+P Şekil 2'nin üst satırı, ilk epoch'taki ortalama katman gradyan normlarını gösterir. DeepCNN–SGD'de ilk konvolüsyonun gradyanı ≈1,2·10⁻⁴ iken fc1 katmanınınki ≈3,8·10⁻² düzeyindedir. Girdiden çıktıya doğru yaklaşık 300 katlık bu artış, Denk. (3)–(4)'teki çarpımsal küçülmenin doğrudan gözlemidir. Alt satırdaki ilk/son katman oranı SGD için 10 epoch boyunca 0,01–0,07 aralığında kalır. Momentum'da oran 1. epoch'ta 0,02 iken platodan çıkışla birlikte 3. epoch'ta 0,4'e yükselir. RMSprop ve Adam'da oran baştan itibaren 0,1–1 aralığındadır: Denk. (10)'da görüldüğü gibi uyarlamalı yöntemlerin adım büyüklüğü gradyanın ölçeğinden bağımsız olduğu için küçük gradyanlı ilk katmanlar da diğerleriyle aynı hızda güncellenir.
+FIG gradient_norm.png|15.0|**Şekil 2.** Üst: ilk epoch'ta katman bazlı ortalama gradyan L2 normu (girdi → çıktı). Alt: ilk/son katman gradyan normu oranı; 1'in çok altındaki değerler gradyan sönmesini gösterir.
+H2 4.3 Öğrenme Oranı Duyarlılığı ve Nümerik Patlama (Deney 2)
+P Şekil 3, DeepCNN için 60 koşunun sonucunu özetler. Kararlı bölge yönteme göre farklı yerdedir. RMSprop ve Adam η ∈ {10⁻⁴, 10⁻³} için 3/3 kararlıdır (en iyi: Adam η = 0,001, %89,2 ± 0,2); η = 0,01'de Adam 3 tohumun 2'sinde öğrenirken RMSprop hiçbirinde öğrenemez. SGD ve Momentum ise küçük η'da sönme nedeniyle takılır ve öğrenebilmek için büyük η gerektirir (SGD η = 0,1'de 2/3, Momentum η = 0,01'de 2/3). Ancak bir üst değerde ıraksarlar: SGD η = 0,5'te 3 tohumun 2'sinde ikinci epoch'un 440. ve 448. iterasyonlarında, Momentum η = 0,1'de iki tohumda ilk epoch'un 210. ve 213. iterasyonlarında NaN/Inf üretir. Sönmüş bir ağda SGD'nin hem öğrenebildiği hem de kararlı kaldığı pencere bu nedenle bir mertebeden dardır.
+P İki farklı ıraksama biçimi gözlenmiştir. (i) **Taşma:** RMSprop η = 0,5'te daha ikinci iterasyonda NaN üretir; Denk. (10)'a göre ilk adım her ağırlıkta 10η = 5 birimdir. (ii) **Sonlu patlama ve ağın ölmesi:** RMSprop ve Adam η ≥ 0,1'de eğitim kaybı ilk epoch'ta 10⁴–10¹⁴ düzeyine çıkar; ardından ReLU birimleri kalıcı olarak negatif bölgeye geçtiği için ilk katmanların gradyanları tam sıfır olur ve kayıp 2,30 civarında donar. Momentum η = 0,5 koşularında da gradyan normu ikinci epoch'tan itibaren tam sıfırdır. Bu koşular hiç NaN üretmediği hâlde öğrenemez; dolayısıyla ıraksamayı tespit etmek için yalnızca NaN/Inf denetimi yeterli değildir.
+FIG lr_heatmap.png|11.0|**Şekil 3.** DeepCNN için öğrenme oranı–yöntem kararlılık haritası (3 tohum, 3 epoch). Hücre değeri sonlu koşuların ortalama son test doğruluğudur.
+H2 4.4 Gradyan Doğrulaması ve Sonlu Fark Hatası (Deney 3)
+TAB **Tablo 5.** En küçük sonlu fark hatasını veren adım ve kuramsal öngörü|2.8,2.6,2.6,3.4,3.6
+| Model | Aritmetik | En iyi h | En küçük göreli hata | Kuramsal h* ≈ ∛ε |
+| ShallowCNN | float64 | 1,0·10⁻⁴ | 2,6·10⁻⁹ | 6,1·10⁻⁶ |
+| DeepCNN | float64 | 1,0·10⁻⁵ | 1,6·10⁻⁸ | 6,1·10⁻⁶ |
+| ShallowCNN | float32 | 3,2·10⁻² | 8,0·10⁻⁴ | 4,9·10⁻³ |
+| DeepCNN | float32 | 3,2·10⁻² | 1,7·10⁻² | 4,9·10⁻³ |
+ENDTAB
+P Şekil 4, (16)'daki V biçimli hata eğrisini doğrular: float64'te sol kol ε/h eğimiyle (−1), sağ kol h² eğimiyle (+2) uyumludur ve en küçük göreli hata ShallowCNN'de 2,6·10⁻⁹, DeepCNN'de 1,6·10⁻⁸'dir. DeepCNN'de en iyi adım (10⁻⁵) kuramsal değere (6·10⁻⁶) çok yakındır. ShallowCNN'de ise h ≥ 3·10⁻⁴ için hata aniden ≈5·10⁻³'e sıçrar. Bu sıçrama kesme hatasından değil, θ ± hv noktalarının bazı ReLU/MaxPool kırılma noktalarını aşmasından, yani türevin süreksizliğinden kaynaklanır; Taylor açılımı bu bölgede geçersizdir. float32'de h ≤ 10⁻⁶ için θ ± hv yuvarlamada θ'ya eşit çıkar, iki kayıp özdeş olur ve D_h = 0 (göreli hata 1) bulunur. 10⁻⁵–10⁻⁴ aralığında ise kaybın son bitlerindeki farklar 1/(2h) ile büyütülür ve göreli hata 10–75'e çıkar. float32'de ulaşılabilen en iyi hata (8·10⁻⁴–1,7·10⁻²) float64'ten 5–6 mertebe kötüdür. Otomatik türev ise float64 sonlu farkla 8–9 anlamlı basamakta uyuşmaktadır; geri yayılım doğrudur.
+FIG fd_error.png|13.0|**Şekil 4.** Merkezi sonlu fark göreli hatasının h'ye göre değişimi (log-log). Kesikli çizgiler ε/h ve h² eğimlerini, noktalı dikey çizgiler kuramsal h*'ı gösterir.
+H2 4.5 Hessian Spektrumu ve Kararlılık Sınırı (Deney 5)
+P Şekil 5(a) kuvvet yönteminin geometrik yakınsamasını gösterir. Başlangıçta (epoch 0) ShallowCNN için yöntem 76 ± 35 iterasyon gerektirirken eğitimden sonra 10–13 iterasyon yeterlidir. Bunun nedeni başlangıçta spektral boşluğun küçük olması ($|λ_2∕λ_1|≈1$), eğitim ilerledikçe baskın bir eğrilik yönünün oluşması ve (14)'teki oranın küçülmesidir. Şekil 5(b)'de ShallowCNN'in en büyük özdeğeri ilk epoch'ta 1,7'den 33'e çıkar, ardından 19–24 aralığında dengelenir. DeepCNN'de $λ_max$ ilk iki epoch boyunca 0,1–0,5 düzeyindedir; bu, kayıp yüzeyinin neredeyse düz olduğu ve SGD'nin takıldığı platonun spektral karşılığıdır. Ağ platodan çıktığı anda (3. epoch) $λ_max$ 61–99'a sıçrar.
+P Şekil 5(c)'deki kuramsal sınır $η_krit=2∕λ_max$ bu gözlemleri açıklar. DeepCNN'in başlangıcında η_krit ≈ 11 olduğu için SGD η = 0,5 ile ilk epoch'u sorunsuz tamamlar. Platodan çıkıldığında ise η_krit 0,02–0,07'ye düşer ve aynı η = 0,5 sınırın 7–25 katı olur: ıraksama ikinci epoch'ta gerçekleşir (Bölüm 4.3). Öte yandan SGD η = 0,1, 2/λmax'ın üzerinde olduğu hâlde 2/3 tohumda öğrenmiştir. Bu, eğitimin keskinliği kendiliğinden 2/η civarında tuttuğu "kararlılık kıyısı" davranışıyla [@cohen] uyumludur: ikinci derece model ıraksamanın başlangıcını değil, yerel davranışı öngörür. Burada λmax'ın Momentum ile eğitilen yörüngede ölçüldüğü not edilmelidir. DeepCNN seed 100, epoch 1'de kuvvet yöntemi negatif baskın özdeğer (−0,19) döndürmüş ve bu ölçüm η_krit hesabından çıkarılmıştır (Bölüm 6).
+FIG sharpness.png|16.0|**Şekil 5.** (a) Kuvvet yönteminin yakınsaması, (b) Hessian'ın en büyük özdeğerinin eğitim boyunca değişimi (3 tohum), (c) kuramsal kararlılık sınırı 2/λmax ve Deney 2'deki ıraksama sınırı.
+H2 4.6 Ablasyon (Deney 6)
+TAB **Tablo 6.** Ablasyon sonuçları (5 tohum; eşleştirilmiş t-testi, Denk. 17)|4.4,3.0,2.3,2.3,1.8,1.8|L
+| Varyant | Taban | Doğruluk (%) | Taban (%) | Fark (puan) | p |
+| DeepCNN+BN / SGD | DeepCNN / SGD | 90,88 ± 0,79 | 18,66 ± 9,33 | +72,22 | 5,9·10⁻⁵ |
+| DeepCNN+BN / Momentum | DeepCNN / Momentum | 91,79 ± 0,37 | 90,40 ± 0,18 | +1,39 | 1,5·10⁻³ |
+| DeepCNN / Adam (düzeltmesiz) | DeepCNN / Adam | 90,64 ± 0,37 | 91,50 ± 0,44 | −0,86 | 0,067 |
+| ShallowCNN / Adam (düzeltmesiz) | ShallowCNN / Adam | 91,71 ± 0,39 | 91,78 ± 0,27 | −0,06 | 0,72 |
+ENDTAB
+P BatchNorm eklenmesi DeepCNN–SGD'nin doğruluğunu %18,7'den %90,9'a çıkarır (+72,2 puan, p = 5,9·10⁻⁵) ve %85 doğruluğa 1,2 epoch'ta ulaşmasını sağlar (Şekil 6a). Böylece gradyan sönmesinin SGD'nin başarısızlığının nedeni olduğu istatistiksel olarak doğrulanmıştır. Momentum'da da plato tamamen ortadan kalkar ve doğruluk anlamlı biçimde artar (+1,39 puan, p = 1,5·10⁻³). Yanlılık düzeltmesinin kaldırılması derin ağda doğruluğu 0,86 puan düşürür ve eğitim kaybını yükseltir (0,198'e karşı 0,159); fakat fark %5 düzeyinde anlamlı değildir (p = 0,067). Sığ ağda etki yoktur (p = 0,72). Düzeltmesiz Adam'ın ilk adımının ≈3,16η olması (Denk. 10) η = 0,001 gibi küçük bir oranda zararsızdır; etkinin η büyüdükçe artması beklenir.
+FIG ablation.png|16.0|**Şekil 6.** Ablasyon: (a) SGD ve (b) Momentum için BatchNorm etkisi, (c) Adam yanlılık düzeltmesinin etkisi. Aynı 5 tohum; gölge ±1 standart sapma.
+H2 4.7 CPU–GPU Karşılaştırması (Deney 4)
+TAB **Tablo 7.** İterasyon başına süre (B = 128, ileri + geri yayılım + Adam adımı; 50 ölçüm)|3.2,3.6,3.8,2.4
+| Model | CPU (ms/iter.) | Tesla T4 (ms/iter.) | Hızlanma |
+| ShallowCNN | 106,2 ± 7,5 | 5,24 ± 0,78 | 20,3× |
+| DeepCNN | 126,3 ± 21,2 | 6,36 ± 0,48 | 19,9× |
+ENDTAB
+P GPU, Colab'ın 2 çekirdekli CPU'suna göre yaklaşık 20 kat hızlıdır: Deney 1'in tamamı (40 koşu × 10 epoch) GPU'da yaklaşık 19 dakika sürmüştür, CPU'da ise yaklaşık 6 saat sürecekti.
+// ======================= 5. TARTIŞMA =======================
+H1 5. Tartışma
+P **Sonuçların anlamı.** Derin ve normalizasyonsuz bir ağda optimizasyon problemi kötü koşullanmıştır: katmanların gradyan ölçekleri iki–üç mertebe farklıdır ve tek bir global η tüm katmanlara uygun olamaz. SGD için bu durum "η küçükse ilk katmanlar öğrenmez, büyükse ağ ıraksar" ikilemine dönüşür (Bölüm 4.3). Uyarlamalı yöntemler $1∕√(v̂_t )$ ölçeklemesiyle köşegen bir ön koşullayıcı gibi davranarak bu ölçek farkını telafi eder; BatchNorm ise sorunu kaynağında, aktivasyonların ölçeğini sabitleyerek çözer. BatchNorm'lu SGD'nin Adam düzeyine yaklaşması (%90,9'a karşı %91,5), iki çözümün aynı soruna yöneldiğini gösterir.
+P **Kararlılık, maliyet ve doğruluk.** Uyarlamalı yöntemlerin dayanıklılığı bedelsiz değildir. Adım büyüklüğü gradyandan bağımsız olduğu için, büyük η'da gradyanın küçülmesi koruyucu bir fren işlevi görmez ve RMSprop η = 0,01'de bile patlar. RMSprop'un ilk adımının 10η olması (Denk. 10), aynı η'da Adam'ın daha dayanıklı olmasını açıklar. Maliyet açısından Adam her parametre için iki ek vektör tutar ve epoch süresi SGD'ye göre %17–23 daha uzundur (Tablo 4); bu farkı, güncellemelerin PyTorch'un birleştirilmiş (fused) çekirdekleri yerine Python düzeyinde yazılması da artırır. Doğruluk açısından sığ ağda Momentum, RMSprop ve Adam tohumlar arası sapma içinde kalırken derin ağ, 10 epoch'luk bütçede sığ ağdan daha iyi sonuç vermemiştir.
+P **Alternatif yöntemler.** Varyansı koruyan He başlatması [@he2015], Denk. (4)'teki 1/6 kazancını 1'e çıkararak SGD'nin derin ağda da öğrenmesini sağlayabilirdi; artık bağlantılar [@he2016] da benzer bir etki gösterir. Gradyan kırpma [@pascanu] Deney 2'deki patlamaları sınırlayabilir, öğrenme oranı ısınması ise ilk adımların büyüklüğünü (Denk. 10) küçülterek RMSprop'u daha yüksek η'da kararlı kılabilirdi. Newton yöntemi O(P³) maliyeti nedeniyle olanaksızdır; ancak (13)'teki Hessian–vektör çarpımını eşlenik gradyanla kullanan Hessian'sız Newton yöntemi [@martens], iterasyon başına birkaç gradyan maliyetiyle eğrilik bilgisinden yararlanabilirdi. Eğitimin float64 ile yapılması ise patlamaları engellemezdi: Deney 2'deki ıraksama yuvarlama hatasından değil η > 2/λmax koşulundan doğan dinamik bir kararsızlıktır ve float64 yalnızca taşmayı geciktirirdi.
+P **Sınırlılıklar.** Sonuçlar tek bir veri kümesi, 10 epoch ve 3–5 tohumla sınırlıdır; n = 5 ile t-testlerinin gücü düşüktür ve Adam ablasyonundaki p = 0,067 daha fazla tohumla anlamlı çıkabilir. λmax yalnızca Momentum yörüngesinde ve 1024 örneklik bir alt kümede ölçülmüştür. Deneyler iki farklı GPU tipinde koşulduğundan mutlak süreler deneyler arasında karşılaştırılmamalıdır.
+// ======================= 6. TEST SÜREÇLERİ =======================
+H1 6. Test Süreçleri
+P Uygulamanın doğruluğu üç düzeyde sınanmıştır: (i) birim testleri, (ii) referans uygulamayla çapraz doğrulama ve (iii) uçtan uca duman testi. Birim testleri Python unittest çerçevesiyle yazılmıştır, veri indirmeden yaklaşık 15 saniyede çalışır ve çıktısı results/tests_output.txt dosyasına kaydedilir. Son çalıştırmada 23 testin tamamı başarılıdır (Tablo 8).
+TAB **Tablo 8.** Birim testlerinin kapsamı ve beklenen çıktılar|4.4,1.1,10.5|L
+| Test sınıfı | Test | Kapsam ve beklenen çıktı |
+| TestOptimizerFormulas | 4 | SGD, Momentum, RMSprop ve Adam'ın adımları elle hesaplanan değerlerle eşleşir |
+| TestOptimizersMatchTorch | 1 | Sıfırdan uygulamalar torch.optim referansıyla aynı sonucu üretir |
+| TestModels | 3 | Çıktı boyutu (B, 10); katman sayısı ve sırası; DeepCNN'de BatchNorm bulunmaması |
+| TestDeterminism | 2 | Aynı tohum → özdeş sonuç; farklı tohum → farklı sonuç |
+| TestDivergenceDetection | 2 | NaN girdi ilk iterasyonda yakalanır; koşu NaN/Inf olarak raporlanır |
+| TestGradientNorm | 1 | Ölçülen katman normu, elle hesaplanan ‖∇W‖₂ ile eşittir |
+| TestFiniteDifference | 3 | float64'te otomatik türev = sonlu fark; kesme hatası h ile artar; float32'de küçük h'de yuvarlama baskındır |
+| TestPowerIteration | 4 | Bilinen spektrumlu kuadratikte λmax = 5 ve yakınsama oranı (3/5)²; Hv = açık Hessian × v; η_krit = 2(1+μ)/λ; modelde λmax > 0 |
+| TestStatusClassification | 1 | NaN/Inf, patladı, takıldı ve kararlı kategorileri doğru atanır |
+| TestAblationComponents | 2 | Düzeltmesiz Adam'ın ilk adımı η(1−β₁)/√(1−β₂) ≈ 3,16η; DeepCNN+BN modeli doğru kurulur |
+ENDTAB
+P **Örnek birim testi.** Yanlılık düzeltmesiz Adam'da tek bir skaler parametre için (θ₀ = 1, g = 2, η = 10⁻³) beklenen değer θ₁ = 1 − η(1 − β₁)g / (√((1 − β₂)g²) + ε)'dir. Test bu değeri 12 ondalık basamakla, adımın η'ya oranını ise (1 − β₁)/√(1 − β₂) ≈ 3,162 değeriyle karşılaştırır. Çapraz doğrulama için tüm deneyler, PyTorch'un hazır optimizer'larını kullanan bir seçenekle (--optim-impl torch) de çalıştırılabilir. Duman testi (--quick) ise 6000 örneklik bir alt kümede tüm hattı yaklaşık bir dakikada çalıştırır ve sunumdaki canlı demo olarak kullanılır.
+P **Karşılaşılan hatalar ve giderilmesi:**
+B **Kuvvet yöntemi testinin başarısız olması.** test_quadratic_known_spectrum testi ilk sürümde hata oranını 5. ve 10. iterasyonlar arasında ölçüyor ve kuramsal 0,36⁵ ≈ 0,006 yerine 0,33 bulduğu için başarısız oluyordu. Nedeni, (14)'teki oranın yalnızca asimptotik bölgede geçerli olmasıdır: ilk iterasyonlarda başlangıç vektörünün diğer özdeğer bileşenleri baskındır. Test, yakınsama hızını hatanın 10⁻¹⁰–10⁻³ aralığındaki ardışık oranlarının geometrik ortalamasıyla ölçecek biçimde düzeltilmiş; ölçülen oran kuramsal (3/5)² = 0,36 ile uyumludur ve test geçmektedir.
+B **Negatif baskın özdeğer.** DeepCNN seed 100, epoch 1'de kuvvet yöntemi −0,19 döndürmüş ve η_krit = ∞ değeri ortalamaları bozmuştur. Nedeni, plato bölgesinde mutlak değerce en büyük özdeğerin negatif olmasıdır. Kararlılık sınırı fonksiyonu λ ≤ 0 için η_krit'i tanımsız döndürür; grafiklerde bu ölçüm hariç tutulmuş ve şekil altında belirtilmiştir.
+B **Log ölçekte yanıltıcı bantlar.** Standart sapma ortalamadan büyük olduğunda (ortalama − std) negatif çıkıyor ve bant log eksende yapay olarak aşağı uzuyordu; bantlar log ölçekte simetrik [m²/(m + s), m + s] aralığıyla çizilecek biçimde düzeltilmiştir.
+// ======================= 7. SONUÇ =======================
+H1 7. Sonuç ve Öneriler
+P Bu çalışmada dört birinci mertebe optimizasyon yöntemi sıfırdan uygulanmış, test edilmiş ve nümerik analiz araçlarıyla karşılaştırılmıştır. Temel bulgular şunlardır: (1) sığ ağda yöntemler benzer doğruluğa ulaşır ve asıl fark yakınsama hızındadır; Adam %85 doğruluğa SGD'den yaklaşık 8 kat daha az iterasyonla ulaşır. (2) Normalizasyonsuz derin ağda gradyan sönmesi ilk/son katman gradyan oranını ≈0,01'e indirir ve SGD'yi işlevsiz kılar; BatchNorm bu etkiyi tamamen giderir (+72 puan, p < 10⁻⁴). (3) Uyarlamalı yöntemler sönmeye dayanıklı fakat büyük η'da daha kırılgandır; RMSprop'un 10η'lik ilk adımı bunun nicel açıklamasıdır. (4) Kuvvet yöntemiyle ölçülen keskinlik, plato–keskin bölge geçişini ve SGD'nin ıraksama zamanlamasını açıklar. (5) float64 sonlu fark, otomatik türevi 8–9 anlamlı basamakta doğrular ve en iyi adım h* ≈ ∛ε kuralına uyar.
+P **Öneriler ve gelecek çalışmalar:** (i) He başlatması [@he2015] ve artık bağlantıların [@he2016] BatchNorm'a alternatif olarak aynı ablasyon çerçevesinde karşılaştırılması; (ii) öğrenme oranı ısınması ve gradyan kırpmanın [@pascanu] Deney 2'deki kararlı bölgeyi ne kadar genişlettiğinin ölçülmesi; (iii) λmax'ın her yöntemin kendi yörüngesinde ölçülmesi ve Lanczos yöntemiyle üst spektrumun izlenmesi; (iv) karma hassasiyetli (float16/bfloat16) eğitimde taşma ve yuvarlama hatalarının incelenmesi; (v) Hessian'sız Newton yönteminin [@martens] birinci mertebe yöntemlerle maliyet–doğruluk karşılaştırması ve sonuçların CIFAR-10 gibi daha zor veri kümelerine genelleştirilmesi.
+// ======================= KAYNAKÇA =======================
+H1 Kaynakça
+REFS
+REFDEF bottou|L. Bottou, F. E. Curtis, and J. Nocedal, "Optimization methods for large-scale machine learning," SIAM Review, vol. 60, no. 2, pp. 223–311, 2018.
+REFDEF bengio94|Y. Bengio, P. Simard, and P. Frasconi, "Learning long-term dependencies with gradient descent is difficult," IEEE Transactions on Neural Networks, vol. 5, no. 2, pp. 157–166, 1994.
+REFDEF robbins|H. Robbins and S. Monro, "A stochastic approximation method," The Annals of Mathematical Statistics, vol. 22, no. 3, pp. 400–407, 1951.
+REFDEF polyak|B. T. Polyak, "Some methods of speeding up the convergence of iteration methods," USSR Computational Mathematics and Mathematical Physics, vol. 4, no. 5, pp. 1–17, 1964.
+REFDEF tieleman|T. Tieleman and G. Hinton, "Lecture 6.5 – RMSProp: Divide the gradient by a running average of its recent magnitude," COURSERA: Neural Networks for Machine Learning, 2012.
+REFDEF kingma|D. P. Kingma and J. Ba, "Adam: A method for stochastic optimization," in Proc. Int. Conf. Learning Representations (ICLR), 2015.
+REFDEF reddi|S. J. Reddi, S. Kale, and S. Kumar, "On the convergence of Adam and beyond," in Proc. Int. Conf. Learning Representations (ICLR), 2018.
+REFDEF wilson|A. C. Wilson, R. Roelofs, M. Stern, N. Srebro, and B. Recht, "The marginal value of adaptive gradient methods in machine learning," in Advances in Neural Information Processing Systems (NeurIPS), vol. 30, 2017, pp. 4148–4158.
+REFDEF glorot|X. Glorot and Y. Bengio, "Understanding the difficulty of training deep feedforward neural networks," in Proc. 13th Int. Conf. Artificial Intelligence and Statistics (AISTATS), 2010, pp. 249–256.
+REFDEF ioffe|S. Ioffe and C. Szegedy, "Batch normalization: Accelerating deep network training by reducing internal covariate shift," in Proc. 32nd Int. Conf. Machine Learning (ICML), 2015, pp. 448–456.
+REFDEF nocedal|J. Nocedal and S. J. Wright, Numerical Optimization, 2nd ed. New York, NY, USA: Springer, 2006.
+REFDEF cohen|J. M. Cohen, S. Kaur, Y. Li, J. Z. Kolter, and A. Talwalkar, "Gradient descent on neural networks typically occurs at the edge of stability," in Proc. Int. Conf. Learning Representations (ICLR), 2021.
+REFDEF pearlmutter|B. A. Pearlmutter, "Fast exact multiplication by the Hessian," Neural Computation, vol. 6, no. 1, pp. 147–160, 1994.
+REFDEF golub|G. H. Golub and C. F. Van Loan, Matrix Computations, 4th ed. Baltimore, MD, USA: Johns Hopkins University Press, 2013.
+REFDEF xiao|H. Xiao, K. Rasul, and R. Vollgraf, "Fashion-MNIST: A novel image dataset for benchmarking machine learning algorithms," arXiv preprint arXiv:1708.07747, 2017.
+REFDEF he2015|K. He, X. Zhang, S. Ren, and J. Sun, "Delving deep into rectifiers: Surpassing human-level performance on ImageNet classification," in Proc. IEEE Int. Conf. Computer Vision (ICCV), 2015, pp. 1026–1034.
+REFDEF paszke|A. Paszke et al., "PyTorch: An imperative style, high-performance deep learning library," in Advances in Neural Information Processing Systems (NeurIPS), vol. 32, 2019, pp. 8024–8035.
+REFDEF he2016|K. He, X. Zhang, S. Ren, and J. Sun, "Deep residual learning for image recognition," in Proc. IEEE Conf. Computer Vision and Pattern Recognition (CVPR), 2016, pp. 770–778.
+REFDEF pascanu|R. Pascanu, T. Mikolov, and Y. Bengio, "On the difficulty of training recurrent neural networks," in Proc. 30th Int. Conf. Machine Learning (ICML), 2013, pp. 1310–1318.
+REFDEF martens|J. Martens, "Deep learning via Hessian-free optimization," in Proc. 27th Int. Conf. Machine Learning (ICML), 2010, pp. 735–742.
